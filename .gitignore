@@ -6,5 +6,31 @@ dist/
 wheels/
 *.egg-info
 
+project-3a51a40b-8c9e-4126-804-e786f68d310d.json
+
 # Virtual environments
 .venv
+
+# 1. Thư mục chứa các Provider (Cực kỳ nặng, không nên upload)
+.terraform/
+
+# 2. File trạng thái (State file) - CHỨA THÔNG TIN NHẠY CẢM
+# Lưu ý: Trong thực tế đi làm, người ta lưu cái này trên Cloud (S3/Azure Blob), không lưu ở Git.
+*.tfstate
+*.tfstate.*
+
+# 3. File biến chứa mật khẩu/Secret (Tuyệt đối không upload)
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# 4. Các file log khi chạy Terraform bị lỗi
+crash.log
+terraform.tfstate.lock.info
+
+# 5. Các file tạm của hệ thống hoặc VS Code
+.history
+.vscode/
