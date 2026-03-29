@@ -1,7 +1,17 @@
 [project]
-name = "project"
+name = "aircraft-digital-twin"
 version = "0.1.0"
-description = "Add your description here"
+description = "Aircraft Digital Twin with PPO-based Predictive Maintenance using NASA CMAPSS"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "tensorflow",
+    "gymnasium",
+    "stable-baselines3",
+    "simpy",
+    "matplotlib",
+    "seaborn",
+]
