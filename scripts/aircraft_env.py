@@ -32,8 +32,11 @@ class AircraftEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
 
     # ── Physical Constants ──────────────────────────────────────
-    V_CRUISE = 250.0          # Vận tốc bay đường trường (m/s ~ đơn vị/cycle)
-    FUEL_RATE = 0.1           # Nhiên liệu tiêu hao mỗi cycle
+    V_CRUISE = 25.0           # Vận tốc ngang đường trường (m/s ~ đơn vị/cycle)
+    V_DESCEND = 10.0          # Vận tốc ngang tiến về đích trong lúc rà xuống
+    DESCEND_RATE = 2000.0     # Tốc độ giảm độ cao (m/cycle) - Bắt đầu từ 10000m xuống mất ~5 cycle
+    LANDING_THRESHOLD = 400.0 # Khoảng cách tối đa từ máy bay đến cụm sân bay phụ / điểm đáp
+    FUEL_RATE = 0.5           # Nhiên liệu tiêu hao mỗi cycle
     SAFE_RUL = 30             # Ngưỡng RUL an toàn tâm lý
     TOTAL_DISTANCE = 5000.0   # Tổng quãng đường bay (đơn vị)
     NUM_SUB_AIRPORTS = 3      # Số sân bay phụ trên đường bay
@@ -75,6 +78,7 @@ class AircraftEnv(gym.Env):
         self.current_engine_data = None
         self.distance_to_destination = self.TOTAL_DISTANCE
         self.sub_airports = []    # Vị trí các sân bay phụ (distance from origin)
+        self.flight_phase = "CRUISING"  # Trạng thái bay: "CRUISING" hoặc "DESCENDING"
 
     # ================================================================
     # Reset
@@ -107,6 +111,7 @@ class AircraftEnv(gym.Env):
         # Khởi tạo hành trình
         self.distance_to_destination = self.TOTAL_DISTANCE
         self.twin.fuel = self.FUEL_CAPACITY
+        self.flight_phase = "CRUISING"
 
         # Sân bay phụ đặt đều trên lộ trình
         spacing = self.TOTAL_DISTANCE / (self.NUM_SUB_AIRPORTS + 1)
@@ -135,41 +140,65 @@ class AircraftEnv(gym.Env):
         if current_rul is None:
             current_rul = 150.0  # Default khi chưa đủ dữ liệu
 
-        # 3. Xử lý Hành động
-        if action == 1:
-            # ── CHỌN HẠ CÁNH BẢO TRÌ ──
-            reward = -5.0  # Phí bảo trì và chậm trễ
-            self.twin.fuel = self.FUEL_CAPACITY  # Bơm đầy nhiên liệu
+        # 3. Xử lý Hành động & Pha Báy (Flight Phase)
+        dist_nearest = self._dist_to_nearest_airport()
 
-            # Reset sang engine mới từ dataset (giả lập thay engine)
-            self._reset_to_new_engine()
-            info['event'] = "MAINTAINED"
-            info['rul_at_landing'] = current_rul
+        # Nếu ở trên cao, muốn LAND thì cần soi xem quanh đó có sân bay không
+        if self.flight_phase == "CRUISING":
+            if action == 1:
+                if dist_nearest <= self.LANDING_THRESHOLD:
+                    self.flight_phase = "DESCENDING"
+                else:
+                    # Bấm LAND giữa không trung, xa trạm => Phạt và ép bay tiếp
+                    reward -= 50.0
+                    action = 0
+            
+            if action == 0:
+                # ── CHỌN TIẾP TỤC BAY ──
+                distance_covered = self.V_CRUISE
+                self.distance_to_destination -= distance_covered
+                self.twin.fuel -= self.FUEL_RATE
+                reward += 10.0  # Thưởng nhích tới đích
 
-        else:
-            # ── CHỌN TIẾP TỤC BAY ──
-            distance_covered = self.V_CRUISE * 1  # Quãng đường mỗi cycle
-            self.distance_to_destination -= distance_covered
+        # Xử lý quá trình lao xuống hạ độ cao dẫu Action là gì! (Non-preemptive)
+        if self.flight_phase == "DESCENDING":
+            self.twin.altitude -= self.DESCEND_RATE
             self.twin.fuel -= self.FUEL_RATE
-            reward = 10.0  # Thưởng vì đang tiến về đích
+            self.distance_to_destination -= self.V_DESCEND
+            reward += 5.0 # Mồi ngon điểm để dụ Agent đáp an toàn
 
-            # Kiểm tra hết nhiên liệu
-            if self.twin.fuel <= 0:
-                reward = -1000.0
-                done = True
-                info['event'] = "FUEL_EMPTY"
+            if self.twin.altitude <= 0:
+                # !! ĐÃ CHẠM ĐẤT
+                reward += 20.0  # Thưởng vì sống sót đáp đất
+                self.twin.fuel = self.FUEL_CAPACITY  # Bơm xăng đầy
+                self._reset_to_new_engine() # Reset về 100% engine RUL
+                self.flight_phase = "CRUISING"
+                
+                # Căn chuẩn vị trí vừa đáp (Snap position to exactly airport to fix overshoot bug)
+                current_pos = self.TOTAL_DISTANCE - self.distance_to_destination
+                if len(self.sub_airports) > 0:
+                    landed_ap = min(self.sub_airports, key=lambda p: abs(p - current_pos))
+                    self.distance_to_destination = self.TOTAL_DISTANCE - (landed_ap + 0.1)
 
-            # KIỂM TRA THẤT BẠI (Nổ máy trên không - RUL <= 0)
-            if current_rul <= 0:
-                reward = -2000.0
-                done = True
-                info['event'] = "CRASHED"
+                info['event'] = "MAINTAINED"
+                info['rul_at_landing'] = current_rul
 
-            # KIỂM TRA HOÀN THÀNH
-            if self.distance_to_destination <= 0:
-                reward = 5000.0
-                done = True
-                info['event'] = "ARRIVED"
+        # KIỂM TRA TỬ VONG (Hỏng RUL hoặc Hết Nhiên Liệu) XẢY RA LÚC ĐANG BAY/DESCEND
+        if self.twin.fuel <= 0:
+            reward = -1000.0
+            done = True
+            info['event'] = "FUEL_EMPTY"
+            
+        if current_rul <= 0:
+            reward = -2000.0
+            done = True
+            info['event'] = "CRASHED"
+
+        # KIỂM TRA HOÀN THÀNH - Về bến cuối
+        if self.distance_to_destination <= 0 and self.flight_phase != "DESCENDING":
+            reward += 5000.0
+            done = True
+            info['event'] = "ARRIVED"
 
         # 4. Trả về Observation mới
         obs = self._get_obs()
@@ -227,6 +256,7 @@ class AircraftEnv(gym.Env):
         self.twin.current_rul = None
         self.twin.status = "HEALTHY"
         self.twin.fuel = self.FUEL_CAPACITY
+        self.twin.altitude = 10000.0
 
         # Nạp 30 cycle đầu (engine mới = khỏe mạnh)
         init_cycles = min(SEQUENCE_LENGTH, len(self.current_engine_data))
