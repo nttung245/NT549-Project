@@ -14,4 +14,13 @@ dependencies = [
     "simpy",
     "matplotlib",
     "seaborn",
+    "ipykernel",
+    "tensorboard",
 ]
+
+[tool.setuptools]
+packages = ["scripts"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

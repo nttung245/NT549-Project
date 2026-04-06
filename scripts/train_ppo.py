@@ -96,7 +96,7 @@ def main():
             tensorboard_log=os.path.join(PROJECT_ROOT, 'logs', 'ppo_aircraft')
         )
 
-        total_timesteps = 100_000
+        total_timesteps = 500_000
         ppo_model.learn(total_timesteps=total_timesteps)
 
         # Save PPO model
