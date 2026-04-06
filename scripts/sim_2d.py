@@ -78,7 +78,8 @@ def draw_env(screen, env, font, step, action, total_reward):
     info_text = f"Alt: {env.twin.altitude:.0f} m | Fuel: {env.twin.fuel:.1f}/{env.FUEL_CAPACITY} | RUL: {env.twin.current_rul if env.twin.current_rul else 0:.1f} cycles"
     screen.blit(font.render(info_text, True, BLACK), (20, status_y + 25))
     
-    act_str = "LAND" if action == 1 else "FLY" if action == 0 else "NONE"
+    act_labels = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
+    act_str = act_labels.get(action, "NONE")
     act_color = RED if action == 1 else BLUE
     act_surf = font.render(f"Last Action: {act_str}", True, act_color)
     screen.blit(act_surf, (20, status_y + 50))

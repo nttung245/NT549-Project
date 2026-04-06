@@ -55,28 +55,29 @@ def main():
 
     # ── 5. Run Demo Episode ─────────────────────────────────────
     print("\n🎮 Running demo episode with random actions...")
-    print("-" * 60)
+    print("-" * 75)
     obs, info = env.reset()
     print(f"  Engine ID: {env.twin.engine_id}")
     print(f"  Route: {env.TOTAL_DISTANCE:.0f} units with {env.NUM_SUB_AIRPORTS} sub-airports")
     print(f"  Initial fuel: {env.twin.fuel:.1f}")
-    print("-" * 60)
+    print("-" * 75)
 
     done = False
     total_reward = 0
     steps = 0
 
     while not done and steps < 500:
-        action = env.action_space.sample()
+        action = env.action_space.sample() # Randomly chooses 0 (Cruise), 1 (Descend), or 2 (Climb)
         obs, reward, done, truncated, info = env.step(action)
         total_reward += reward
         steps += 1
 
         if steps % 20 == 0 or done or 'event' in info:
-            action_name = "FLY" if action == 0 else "LAND"
-            print(f"  Step {steps:>4} | Action: {action_name:>4} | "
-                  f"RUL: {obs[3]:>6.1f} | Fuel: {obs[2]:>5.1f} | "
-                  f"Dist: {obs[5]:>7.0f} | Reward: {reward:>+8.0f}")
+            action_map = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
+            action_name = action_map.get(action, "UNKNOWN")
+            print(f"  Step {steps:>4} | Action: {action_name:>7} | "
+                  f"Alt: {obs[0]:>6.0f} | RUL: {obs[3]:>6.1f} | "
+                  f"Fuel: {obs[2]:>5.1f} | Dist: {obs[5]:>7.0f} | Reward: {reward:>+8.0f}")
 
     print("-" * 60)
     event = info.get('event', 'TIMEOUT')

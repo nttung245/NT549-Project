@@ -106,7 +106,10 @@ async def simulation_loop():
 
             obs, r, done, t, info = env.step(action)
             step_count += 1
-            act_str = "LAND" if action == 1 else "FLY"
+            
+            # Map actions to readable strings
+            action_map = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
+            act_str = action_map.get(action, "UNKNOWN")
             
             update_current_state(obs, info, r, step_count, act_str)
             await broadcast_state()
@@ -147,11 +150,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 update_current_state(obs, info, 0.0, 0, "RESET")
                 await broadcast_state()
                 
-            elif cmd in ["FORCE_FLY", "FORCE_LAND"]:
+            elif cmd in ["FORCE_CRUISE", "FORCE_DESCEND", "FORCE_CLIMB"]:
                 if not is_running and env: # Manual step controls
-                    action = 0 if cmd == "FORCE_FLY" else 1
+                    # Map websocket commands to environment actions
+                    cmd_to_action = {
+                        "FORCE_CRUISE": 0,
+                        "FORCE_DESCEND": 1,
+                        "FORCE_CLIMB": 2
+                    }
+                    action = cmd_to_action[cmd]
                     obs, r, done, t, info = env.step(action)
-                    act_str = "LAND" if action == 1 else "FLY"
+                    
+                    action_map = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
+                    act_str = action_map[action]
+                    
                     current_state["step"] += 1
                     update_current_state(obs, info, r, current_state["step"], act_str)
                     
