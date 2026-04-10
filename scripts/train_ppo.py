@@ -7,6 +7,7 @@ Uses stable-baselines3 to train a PPO agent on AircraftEnv.
 import os
 import sys
 import numpy as np
+import mlflow
 
 # Ensure project root is in path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from scripts.data_processor import prepare_data, FEATURES, KEY_SENSORS
 from scripts.lstm_model import create_sequences, train_model
 from scripts.aircraft_env import AircraftEnv
+from scripts.rl_callbacks import MLflowLoggingCallback
 
 # Attempt to import stable-baselines3
 try:
@@ -78,31 +80,47 @@ def main():
         except Exception as e:
             print(f"⚠️  Environment check warning: {e}")
 
-    # ── 7. Train PPO Agent ──────────────────────────────────────
-    if HAS_SB3:
-        print("🚀 Training PPO Agent...")
-        ppo_model = PPO(
-            "MlpPolicy",
-            env,
-            verbose=1,
-            learning_rate=3e-4,
-            n_steps=2048,
-            batch_size=64,
-            n_epochs=10,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.01,
-            tensorboard_log=os.path.join(PROJECT_ROOT, 'logs', 'ppo_aircraft')
-        )
+        # ── 7. Train PPO Agent ──────────────────────────────────────
+        if HAS_SB3:
+            print("🚀 Training PPO Agent with MLflow...")
+            
+            # MLflow configuration
+            mlflow.set_tracking_uri("http://localhost:5000")
+            mlflow.set_experiment("PPO-Aircraft-Maintenance")
+            
+            with mlflow.start_run(run_name="PPO_Script_Training"):
+                ppo_model = PPO(
+                    "MlpPolicy",
+                    env,
+                    verbose=1,
+                    learning_rate=3e-4,
+                    n_steps=2048,
+                    batch_size=64,
+                    n_epochs=10,
+                    gamma=0.99,
+                    gae_lambda=0.95,
+                    clip_range=0.2,
+                    ent_coef=0.01,
+                    tensorboard_log=os.path.join(PROJECT_ROOT, 'logs', 'ppo_aircraft')
+                )
 
-        total_timesteps = 500_000
-        ppo_model.learn(total_timesteps=total_timesteps)
+                # Log parameters
+                mlflow.log_param("learning_rate", 3e-4)
+                mlflow.log_param("total_timesteps", 500000)
 
-        # Save PPO model
-        ppo_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft')
-        ppo_model.save(ppo_path)
-        print(f"💾 PPO model saved to {ppo_path}")
+                # Add MLflow Callback
+                mlflow_cb = MLflowLoggingCallback(verbose=1)
+                
+                total_timesteps = 500_000
+                ppo_model.learn(total_timesteps=total_timesteps, callback=mlflow_cb)
+
+                # Save PPO model
+                ppo_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft')
+                ppo_model.save(ppo_path)
+                print(f"💾 PPO model saved to {ppo_path}")
+                
+                # Log final model as artifact
+                mlflow.log_artifact(ppo_path + ".zip", artifact_path="model")
 
         # ── 8. Evaluate ────────────────────────────────────────
         print("\n📊 Evaluating trained agent...")
