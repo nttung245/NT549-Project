@@ -1,6 +1,9 @@
 import os
+import re
 import mlflow
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import KVWriter
 
 class SaveVecNormalizeCallback(BaseCallback):
     """
@@ -21,33 +24,35 @@ class SaveVecNormalizeCallback(BaseCallback):
                 print(f"Saved VecNormalize stats to {stats_path}")
         return True
 
+class MLflowOutputFormat(KVWriter):
+    """
+    Custom writer to push Stable Baselines 3 logger metrics (rollout/, train/, time/) to MLflow.
+    This is more robust than a callback because it hooks into the logger's dump() cycle.
+    """
+    def write(self, key_values, key_excluded, step=0):
+        if not mlflow.active_run():
+            return
+            
+        for key, value in key_values.items():
+            if isinstance(value, (int, float, np.number)):
+                # Clean key for MLflow compatibility (no spaces, parentheses, etc.)
+                clean_key = re.sub(r'[^\w\-\./]', '_', key)
+                mlflow.log_metric(clean_key, float(value), step=step)
+
 class MLflowLoggingCallback(BaseCallback):
     """
-    Callback for logging metrics to MLflow.
+    Callback for registering the MLflowOutputFormat into the Stable Baselines 3 logger.
     """
     def __init__(self, verbose: int = 0):
         super(MLflowLoggingCallback, self).__init__(verbose)
         
-    def _on_step(self) -> bool:
-        # Log metrics occasionally or on every step
-        # SB3 logs mostly on rollout end, but we can catch them here
-        return True
+    def _on_training_start(self) -> None:
+        """
+        Register the MLflow writer into the logger when training starts.
+        """
+        self.logger.output_formats.append(MLflowOutputFormat())
+        if self.verbose > 0:
+            print("🚀 MLflowOutputFormat registered to SB3 Logger.")
 
-    def _on_rollout_end(self) -> None:
-        """
-        Log metrics from the logger to MLflow.
-        """
-        # Get metrics from SB3 logger
-        # Stable Baselines 3 Logger uses `name_to_value` to store log data
-        if self.logger is not None:
-            if hasattr(self.logger, 'name_to_value'):
-                metrics = self.logger.name_to_value
-            elif hasattr(self.logger, 'get_log_dict'):
-                metrics = self.logger.get_log_dict()
-            else:
-                metrics = {}
-                
-            for key, val in metrics.items():
-                if isinstance(val, (int, float)):
-                    # Clean up key name for MLflow if needed
-                    mlflow.log_metric(key.replace("/", "_"), val, step=self.num_timesteps)
+    def _on_step(self) -> bool:
+        return True

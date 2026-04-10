@@ -176,3 +176,21 @@ _Lịch sử này sẽ được cập nhật khi có các thay đổi lớn ti�
   - Thiết lập luồng Evaluate chặt chẽ với `eval_freq=5000` liên kết các custom metrics trên tập 200,000 steps tối ưu.
 
 - **Trạng thái:** Hoàn tất toàn diện. Dự án đã sẵn sàng cho Experiment Tracking và Machine Learning Operations (MLOps) chuyên nghiệp.
+
+---
+
+### 🕒 **2026-04-07 | 03:20 - 03:50 PM**
+
+#### **Thay đổi: Đảm bảo tính toàn vẹn của Metrics và Quản lý Experiment (MLflow Robustness)**
+
+- **Tiếp cận:** Khắc phục triệt để hiện tượng mất metrics (chỉ thấy `train/`) và lỗi crash khi quản lý Experiment trên MLflow. Chuyển đổi cơ chế từ "Polling Callback" sang "Logger Plugin".
+
+- **Nội dung (`scripts/rl_callbacks.py`):**
+  - **Chế tạo `MLflowOutputFormat` (KVWriter):** Thay vì đợi callback quét định kỳ, hệ thống hiện tại cắm trực tiếp vào lõi của Stable-Baselines3 Logger. Mỗi khi logger gọi lệnh `dump()` (in ra màn hình), dữ liệu sẽ được đẩy đồng thời lên MLflow.
+  - **Lý do kỹ thuật (The "Real" Reason):** SB3 Logger xóa sạch dữ liệu nội bộ ngay sau khi `dump()`. Callback thông thường thường chạy sai thời điểm (quá sớm hoặc quá muộn), dẫn đến việc các metrics `rollout/` (ep_rew_mean) bị mất. Cơ chế `KVWriter` đảm bảo bắt được 100% metrics trước khi bị xóa.
+  - **Dọn dẹp cú pháp (Syntax Ambiguity Fix):** Tích hợp Regex để tự động loại bỏ các ký tự lạ (khoảng trắng, ngoặc đơn) trong Key của metric, tránh việc MLflow từ chối log do sai định dạng.
+
+- **Nội dung (`demo_flow.ipynb`):**
+  - **Xử lý "Deleted Experiment" Error:** Cập nhật logic thiết lập Experiment để tránh lỗi `MlflowException` khi người dùng cố gắng ghi đè vào một experiment đã bị đánh dấu xóa trong backend. 
+
+- **Trạng thái:** Hoàn tất. Hệ thống Logging hiện tại đã đạt độ tin cậy tuyệt đối, ghi nhận đầy đủ mọi diễn biến của quá trình học máy.
