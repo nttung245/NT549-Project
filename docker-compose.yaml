@@ -15,3 +15,15 @@ services:
         --backend-store-uri /mlruns
         --default-artifact-root /mlruns
     restart: unless-stopped
+
+  training:
+    build: .
+    container_name: rl-trainer
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./mlruns:/app/mlruns
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - mlflow

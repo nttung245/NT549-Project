@@ -42,10 +42,19 @@ def evaluate_rl_agent(ppo_model, test_rolling, lstm_model, scaler, num_episodes=
                 action, _ = ppo_model.predict(obs, deterministic=True)
             else:
                 # Heuristic fallback: Cruise if RUL is high, Descend if RUL is low
-                # obs[0][3] is Current_RUL, obs[0][4] is Dist_to_Next_Airport
-                if obs[0][3] > 60:
+                # New 10-dim indexing:
+                # obs[0][3] is Current_RUL
+                # obs[0][4:9] are Sub-airports
+                # obs[0][9] is Dist_to_Destination
+                
+                current_rul = obs[0][3]
+                airport_dists = obs[0][4:9]
+                dists_ahead = [d for d in airport_dists if d > 0]
+                dist_next = min(dists_ahead) if dists_ahead else obs[0][9]
+                
+                if current_rul > 60:
                     action = [0]  # CRUISE
-                elif obs[0][4] < 1000 and obs[0][0] > 0:
+                elif dist_next < 1000 and obs[0][0] > 0:
                     action = [1]  # DESCEND
                 else:
                     action = [0]  # CRUISE

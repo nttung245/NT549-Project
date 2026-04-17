@@ -56,3 +56,30 @@ class MLflowLoggingCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         return True
+
+class SyncVecNormalizeCallback(BaseCallback):
+    """
+    Synchronize the statistics of the evaluation environment with the
+    statistics of the training environment.
+    """
+    def __init__(self, eval_env, verbose: int = 0):
+        super(SyncVecNormalizeCallback, self).__init__(verbose)
+        self.eval_env = eval_env
+
+    def _on_step(self) -> bool:
+        # Sync stats from train_env to eval_env
+        if self.model.get_vec_normalize_env() is not None:
+            # We assume eval_env is also a VecNormalize or contains one
+            from stable_baselines3.common.vec_env import VecNormalize
+            
+            train_venv = self.model.get_vec_normalize_env()
+            eval_venv = self.eval_env
+            
+            # If eval_env is a list or something else, we need to be careful
+            # But usually it's passed as the VecNormalize object directly in the training script
+            if isinstance(eval_venv, VecNormalize):
+                eval_venv.obs_rms = train_venv.obs_rms
+                # We usually don't sync reward_rms for eval
+                if self.verbose > 1:
+                    print("🔄 Synced VecNormalize stats to eval_env")
+        return True
