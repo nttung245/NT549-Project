@@ -15,6 +15,10 @@ if PROJECT_ROOT not in sys.path:
 from scripts.data_processor import prepare_data, FEATURES, KEY_SENSORS
 from scripts.aircraft_env import AircraftEnv
 
+# RL Components
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
+
 app = FastAPI(title="Aircraft Digital Twin - WebSocket Server")
 
 app.add_middleware(
@@ -32,6 +36,8 @@ is_running = False
 current_state = {}
 clients = set()
 lstm_model = None
+ppo_model = None
+vec_normalize = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -61,20 +67,51 @@ async def startup_event():
     )
     
     obs, info = env.reset()
+    
+    # --- Load RL Agent ---
+    ppo_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft')
+    stats_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft_vec_normalize.pkl')
+    
+    global ppo_model, vec_normalize
+    if os.path.exists(ppo_path + ".zip") and os.path.exists(stats_path):
+        try:
+            # We need a DummyVecEnv to wrap for VecNormalize
+            def make_dummy_env(): return env
+            dummy_vec_env = DummyVecEnv([make_dummy_env])
+            
+            # Load normalization stats
+            vec_normalize = VecNormalize.load(stats_path, dummy_vec_env)
+            vec_normalize.training = False
+            vec_normalize.norm_reward = False
+            
+            # Load PPO Model
+            ppo_model = PPO.load(ppo_path, env=vec_normalize)
+            print("🤖 Loaded PPO RL Agent and Normalization stats.")
+        except Exception as e:
+            print(f"❌ Error loading PPO model: {e}")
+            ppo_model = None
+    else:
+        print("⚠️ Warning: PPO model or stats not found. Falling back to heuristic policy.")
+
     update_current_state(obs, info, 0.0, 0, "INIT")
 
 
 def update_current_state(obs, info, reward, step, action_str):
     global current_state
-    # obs = [Altitude, Velocity, Fuel, Current_RUL, Dist_to_Next_Airport, Dist_to_Destination]
+    # obs = [Altitude, Velocity, Fuel, Current_RUL, Dist_AP1, Dist_AP2, Dist_AP3, Dist_AP4, Dist_AP5, Dist_Dest]
+    # "dist_next" in UI should show the distance to the closest airport AHEAD.
+    airport_dists = obs[4:9]
+    dists_ahead = [d for d in airport_dists if d > 0]
+    dist_next = min(dists_ahead) if dists_ahead else obs[9] # Fallback to destination if all passed
+
     current_state = {
         "step": step,
         "altitude": float(obs[0]),
         "velocity": float(obs[1]),
         "fuel": float(obs[2]),
         "rul": float(obs[3]),
-        "dist_next": float(obs[4]),
-        "dist_dest": float(obs[5]),
+        "dist_next": float(dist_next),
+        "dist_dest": float(obs[9]),
         "fuel_capacity": float(env.FUEL_CAPACITY),
         "total_distance": float(env.TOTAL_DISTANCE),
         "sub_airports": [float(x) for x in env.sub_airports],
@@ -95,14 +132,23 @@ async def simulation_loop():
 
     while True:
         if is_running and env:
-            # Simple policy for auto-run demonstration
-            dist_closest = env._dist_to_nearest_airport()
-            current_rul = env.twin.current_rul if env.twin.current_rul else 150
-            action = 0  # Default fly
+            # Use RL Agent if available, else fallback to heuristic
+            obs = env._get_obs() # Get raw observation
             
-            if (current_rul < 30 or env.twin.fuel < 20) and env.flight_phase == "CRUISING":
-                if dist_closest < env.LANDING_THRESHOLD:
-                    action = 1 # Land
+            if ppo_model and vec_normalize:
+                # 1. Normalize observation
+                norm_obs = vec_normalize.normalize_obs(obs)
+                # 2. Predict action
+                action, _ = ppo_model.predict(norm_obs, deterministic=True)
+                action = int(action)
+            else:
+                # Simple heuristic policy fallback
+                dist_closest = env._dist_to_nearest_airport()
+                current_rul = env.twin.current_rul if env.twin.current_rul else 150
+                action = 0  # Default fly
+                if (current_rul < 30 or env.twin.fuel < 20) and env.flight_phase == "CRUISING":
+                    if dist_closest < env.LANDING_THRESHOLD:
+                        action = 1 # Land
 
             obs, r, done, t, info = env.step(action)
             step_count += 1
@@ -150,11 +196,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 update_current_state(obs, info, 0.0, 0, "RESET")
                 await broadcast_state()
                 
-            elif cmd in ["FORCE_CRUISE", "FORCE_DESCEND", "FORCE_CLIMB"]:
+            elif cmd in ["FORCE_FLY", "FORCE_CRUISE", "FORCE_LAND", "FORCE_DESCEND", "FORCE_CLIMB"]:
                 if not is_running and env: # Manual step controls
                     # Map websocket commands to environment actions
                     cmd_to_action = {
+                        "FORCE_FLY": 0,
                         "FORCE_CRUISE": 0,
+                        "FORCE_LAND": 1,
                         "FORCE_DESCEND": 1,
                         "FORCE_CLIMB": 2
                     }

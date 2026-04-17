@@ -32,7 +32,7 @@ from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 
 
-def main():
+def main(run_name=None):
     # ── 1. Load & Prepare Data ──────────────────────────────────
     data_dir = os.path.join(PROJECT_ROOT, 'CMAPSSData')
     print("📂 Loading CMAPSS data...")
@@ -82,13 +82,20 @@ def main():
 
         # ── 7. Train PPO Agent ──────────────────────────────────────
         if HAS_SB3:
-            print("🚀 Training PPO Agent with MLflow...")
+            # Set default run name if not provided
+            if run_name is None:
+                from datetime import datetime
+                run_name = f"PPO_Run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             
+            print(f"🚀 Training PPO Agent with MLflow (Run: {run_name})...")
+
             # MLflow configuration
-            mlflow.set_tracking_uri("http://localhost:5000")
+            tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
+            print(f"📊 Connecting to MLflow at: {tracking_uri}")
+            mlflow.set_tracking_uri(tracking_uri)
             mlflow.set_experiment("PPO-Aircraft-Maintenance")
-            
-            with mlflow.start_run(run_name="PPO_Script_Training"):
+
+            with mlflow.start_run(run_name=run_name):
                 ppo_model = PPO(
                     "MlpPolicy",
                     env,
@@ -114,8 +121,8 @@ def main():
                 total_timesteps = 500_000
                 ppo_model.learn(total_timesteps=total_timesteps, callback=mlflow_cb)
 
-                # Save PPO model
-                ppo_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft')
+                # Save PPO model with run name
+                ppo_path = os.path.join(PROJECT_ROOT, 'models', f'ppo_aircraft_{run_name}')
                 ppo_model.save(ppo_path)
                 print(f"💾 PPO model saved to {ppo_path}")
                 
@@ -223,4 +230,15 @@ def evaluate_random(env, n_episodes=5):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train PPO Agent for Aircraft Predictive Maintenance")
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Custom name for this training run (default: auto-generated with timestamp)"
+    )
+    
+    args = parser.parse_args()
+    main(run_name=args.run_name)

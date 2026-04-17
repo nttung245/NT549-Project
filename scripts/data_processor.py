@@ -52,7 +52,7 @@ def load_cmapss_data(data_dir: str):
     true_rul = pd.read_csv(rul_path, sep=r'\s+', header=None, names=['RUL_ground_truth'])
     true_rul['unit_nr'] = true_rul.index + 1
 
-    print(f"✅ Loaded CMAPSS data: {len(train_data)} train rows, {len(test_data)} test rows, {len(true_rul)} engines")
+    print(f"Loaded CMAPSS data: {len(train_data)} train rows, {len(test_data)} test rows, {len(true_rul)} engines")
     return train_data, test_data, true_rul
 
 
@@ -117,6 +117,6 @@ def prepare_data(data_dir: str):
     # Chuẩn hóa (fit trên tập train)
     scaler = StandardScaler()
     scaler.fit(train_rolling[FEATURES])
-    print(f"✅ Scaler fitted on {len(FEATURES)} features")
+    print(f"Scaler fitted on {len(FEATURES)} features")
 
     return train_rolling, test_rolling, true_rul, scaler
