@@ -65,7 +65,7 @@ def main(run_name=None):
     print("✈️  Creating AircraftEnv...")
     env = AircraftEnv(
         fleet_data=train_rolling,
-        model=lstm_model,
+        model_path=model_path,
         scaler=scaler,
         sensor_list=KEY_SENSORS,
         features_list=FEATURES

@@ -8,10 +8,6 @@ variable "gcp_region" {
   type        = string
 }
 
-variable "gcp_svc_key" {
-  description = "GCP Service Account Key"
-  type        = string
-}
 
 variable "instance_name" {
   description = "Name of the GCE instance"
@@ -22,11 +18,11 @@ variable "instance_name" {
 variable "machine_type" {
   description = "Machine type for the GCE instance"
   type        = string
-  default     = "e2-standard-4"
+  default     = "c2-standard-4"
 }
 
 variable "zone" {
   description = "GCP Zone"
   type        = string
-  default     = "us-east1-b"
+  default     = "asia-east1-a"
 }

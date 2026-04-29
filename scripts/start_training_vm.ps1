@@ -1,8 +1,8 @@
 # Start GCP Training VM
 # Usage: .\scripts\start_training_vm.ps1
 
-$projectName = "project-3a51a40b-8c9e-4126-804" # From terraform.tfvars
-$zone = "us-east1-b"
+$projectName = "nt549-494407"
+$zone = "asia-east1-a"
 $instanceName = "rl-training-vm"
 
 Write-Host "🚀 Starting GCP Training VM: $instanceName..." -ForegroundColor Cyan

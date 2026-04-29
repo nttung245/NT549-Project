@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
@@ -12,18 +10,6 @@ services:
       mlflow server
         --host 0.0.0.0
         --port 5000
-        --backend-store-uri /mlruns
+        --backend-store-uri sqlite:///mlruns/mlflow.db
         --default-artifact-root /mlruns
     restart: unless-stopped
-
-  training:
-    build: .
-    container_name: rl-trainer
-    environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-    volumes:
-      - ./mlruns:/app/mlruns
-      - ./models:/app/models
-      - ./logs:/app/logs
-    depends_on:
-      - mlflow

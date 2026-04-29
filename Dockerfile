@@ -17,11 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
+RUN pip install --no-cache-dir .
 
 # Expose ports (for TensorBoard or MLflow if run inside)
 EXPOSE 5000 6006

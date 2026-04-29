@@ -36,8 +36,8 @@ systemctl start docker
 
 echo "✅ Docker installed and ready."
 
-# Setup MLflow directory for persistent runs
+# Setup MLflow and project directory permissions
 mkdir -p /opt/rl-project/mlruns
-chmod -R 777 /opt/rl-project/mlruns
+chmod -R 777 /opt/rl-project
 
 echo "🎉 Startup script completed successfully."
