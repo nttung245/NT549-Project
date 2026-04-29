@@ -39,7 +39,7 @@ def main():
     # Create environment
     env = AircraftEnv(
         fleet_data=train_rolling,
-        model=lstm_model,
+        model_path=model_path,
         scaler=scaler,
         sensor_list=KEY_SENSORS,
         features_list=FEATURES

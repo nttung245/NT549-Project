@@ -55,12 +55,12 @@ class AircraftEnv(gym.Env):
     NUM_SUB_AIRPORTS = 5      # Số sân bay phụ trên đường bay
     FUEL_CAPACITY = 300.0     # Dung tích nhiên liệu tối đa
 
-    def __init__(self, fleet_data: pd.DataFrame, model, scaler,
+    def __init__(self, fleet_data: pd.DataFrame, model_path: str, scaler,
                  sensor_list: list = None, features_list: list = None):
         """
         Args:
             fleet_data: DataFrame huấn luyện (đã rolling + có cột RUL).
-            model: Trained Keras LSTM/GRU model.
+            model_path: Path to trained Keras LSTM/GRU model file.
             scaler: Fitted StandardScaler.
             sensor_list: List sensor columns cho LSTM.
             features_list: List tất cả feature columns cho scaler.
@@ -68,10 +68,19 @@ class AircraftEnv(gym.Env):
         super(AircraftEnv, self).__init__()
 
         self.fleet_data = fleet_data
-        self.model = model
+        self.model_path = model_path
         self.scaler = scaler
         self.sensor_list = sensor_list or KEY_SENSORS
         self.features_list = features_list or FEATURES
+
+        # Tự động load model nội bộ để hỗ trợ chạy đa luồng (SubprocVecEnv)
+        # Việc load ở đây đảm bảo mỗi subprocess có một bản sao riêng, không bị lỗi pickle trên Windows
+        import tensorflow as tf
+        try:
+            self.model = tf.keras.models.load_model(model_path)
+        except Exception as e:
+            print(f"⚠️ Error loading model in environment: {e}")
+            self.model = None
 
         # ── Spaces ──────────────────────────────────────────────
         # Action 0: CRUISE (Maintain altitude)
@@ -99,6 +108,13 @@ class AircraftEnv(gym.Env):
         # ── Internal state ──────────────────────────────────────
         self.twin = None
         self.engine_units = fleet_data['unit_nr'].unique()
+        
+        # Tối ưu hóa: Chuyển DataFrame sang Dictionary của NumPy arrays để lookup O(1)
+        self.unit_data_map = {
+            unit_id: group.sort_values('time_cycles')[self.features_list].values.astype(np.float32)
+            for unit_id, group in fleet_data.groupby('unit_nr')
+        }
+
         self.current_unit_idx = 0
         self.current_cycle_idx = 0
         self.current_engine_data = None
@@ -112,13 +128,9 @@ class AircraftEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Chọn ngẫu nhiên một engine unit từ dataset
+        # Chọn ngẫu nhiên một engine unit từ dataset (Sử dụng lookup O(1))
         unit_id = self.np_random.choice(self.engine_units)
-        self.current_engine_data = (
-            self.fleet_data[self.fleet_data['unit_nr'] == unit_id]
-            .sort_values('time_cycles')
-            .reset_index(drop=True)
-        )
+        self.current_engine_data = self.unit_data_map[unit_id]
 
         # Tạo Digital Twin
         self.twin = AircraftDigitalTwin(
@@ -127,11 +139,13 @@ class AircraftEnv(gym.Env):
             sensor_list=self.sensor_list, fuel_capacity=self.FUEL_CAPACITY
         )
 
-        # Nạp 30 cycle đầu vào buffer trong twin
+        # Nạp các cycle đầu vào buffer trong twin (Sử dụng NumPy slicing - Cực nhanh)
         init_cycles = min(SEQUENCE_LENGTH, len(self.current_engine_data))
-        for i in range(init_cycles):
-            row = self.current_engine_data.iloc[i]
-            self.twin.update_sensor_data(row[self.features_list].values.tolist())
+        if init_cycles > 0:
+            # Gán trực tiếp mảng dữ liệu thay vì chạy vòng lặp
+            self.twin.buffer[-init_cycles:] = self.current_engine_data[:init_cycles]
+            self.twin.buffer_filled = init_cycles
+        
         self.current_cycle_idx = init_cycles
 
         # Khởi tạo hành trình
@@ -320,38 +334,36 @@ class AircraftEnv(gym.Env):
         return min(abs(ap - current_pos) for ap in self.sub_airports)
 
     def _get_next_sensor_row(self):
-        """Lấy dòng cảm biến tiếp theo từ dataset hiện tại."""
+        """Lấy dòng cảm biến tiếp theo từ dataset hiện tại (Đã tối ưu NumPy)."""
         if self.current_cycle_idx < len(self.current_engine_data):
-            row = self.current_engine_data.iloc[self.current_cycle_idx]
+            row = self.current_engine_data[self.current_cycle_idx]
             self.current_cycle_idx += 1
-            return row[self.features_list].values.tolist()
+            return row
         return None  # Hết dữ liệu cho engine hiện tại
 
     def _reset_to_new_engine(self):
         """
-        Giả lập bảo trì: chọn engine mới từ dataset,
-        nạp lại 30 cycle đầu vào buffer.
+        Giả lập bảo trì: chọn engine mới từ dataset (Lookup O(1)),
+        nạp lại các cycle đầu vào buffer bằng NumPy slicing.
         """
+        # Chọn engine mới từ dataset
         unit_id = self.np_random.choice(self.engine_units)
-        self.current_engine_data = (
-            self.fleet_data[self.fleet_data['unit_nr'] == unit_id]
-            .sort_values('time_cycles')
-            .reset_index(drop=True)
-        )
+        self.current_engine_data = self.unit_data_map[unit_id]
 
         # Reset twin buffer
-        self.twin.buffer = []
+        self.twin.buffer.fill(0)
+        self.twin.buffer_filled = 0
         self.twin.engine_id = unit_id
         self.twin.current_rul = None
         self.twin.status = "HEALTHY"
         self.twin.fuel = self.FUEL_CAPACITY
         self.twin.altitude = 10000.0
         self.twin.velocity = self.V_CRUISE
-        self.flight_phase = "CRUISING"  # Reset flight phase to initial state
+        self.flight_phase = "CRUISING"
 
-        # Nạp 30 cycle đầu (engine mới = khỏe mạnh)
+        # Nạp cycle đầu (engine mới = khỏe mạnh) bằng NumPy slicing
         init_cycles = min(SEQUENCE_LENGTH, len(self.current_engine_data))
-        for i in range(init_cycles):
-            row = self.current_engine_data.iloc[i]
-            self.twin.update_sensor_data(row[self.features_list].values.tolist())
+        if init_cycles > 0:
+            self.twin.buffer[-init_cycles:] = self.current_engine_data[:init_cycles]
+            self.twin.buffer_filled = init_cycles
         self.current_cycle_idx = init_cycles

@@ -7,6 +7,12 @@ Refactored from RocketDigitalTwin → AircraftDigitalTwin.
 
 import numpy as np
 import pandas as pd
+import tensorflow as tf
+
+# Tối ưu hóa Threading cho CPU: Tránh tranh chấp tài nguyên khi chạy nhiều Env song song
+# Điều này cực kỳ quan trọng khi chạy 4-8 Env trên CPU 4 nhân / 16 luồng
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 
 from scripts.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
 
@@ -33,44 +39,48 @@ class AircraftDigitalTwin:
         self.fuel = fuel_capacity
 
         # AI buffer & status
-        self.buffer = []
+        # Sử dụng NumPy array cố định kích thước thay vì list để tối ưu CPU
+        self.n_features = len(self.features_list)
+        self.buffer = np.zeros((self.seq_length, self.n_features), dtype=np.float32)
+        self.buffer_filled = 0  # Đếm số dòng đã nạp
+
         self.status = "HEALTHY"
         self.current_rul = None
 
     def update_sensor_data(self, new_data_row):
         """
-        Nạp dữ liệu cảm biến mới vào sliding window buffer.
-
-        Args:
-            new_data_row: dict, list, hoặc pd.Series chứa giá trị cảm biến.
+        Nạp dữ liệu cảm biến mới vào sliding window buffer (Sử dụng NumPy).
         """
-        self.buffer.append(new_data_row)
-        if len(self.buffer) > self.seq_length:
-            self.buffer.pop(0)
+        # Đẩy dữ liệu cũ lên và chèn dòng mới vào cuối
+        self.buffer[:-1] = self.buffer[1:]
+        self.buffer[-1] = new_data_row
+
+        if self.buffer_filled < self.seq_length:
+            self.buffer_filled += 1
 
     def predict_status(self) -> float | None:
         """
-        Dự đoán RUL dựa trên dữ liệu chuỗi thời gian trong buffer.
-
-        Returns:
-            Predicted RUL (float) hoặc None nếu chưa đủ dữ liệu.
+        Dự đoán RUL dựa trên dữ liệu chuỗi thời gian trong buffer (Đã tối ưu CPU).
         """
-        if len(self.buffer) < self.seq_length:
+        if self.buffer_filled < self.seq_length:
             self.status = "COLLECTING_DATA"
             return None
 
-        # Tiền xử lý: buffer → DataFrame → Scale → lọc sensors
-        df_temp = pd.DataFrame(self.buffer, columns=self.features_list)
-        scaled_data = self.scaler.transform(df_temp[self.features_list])
+        # Tiền xử lý: Scale trực tiếp từ NumPy array (Bỏ qua pd.DataFrame để tăng tốc)
+        # scaler.transform nhận (n_samples, n_features)
+        scaled_data = self.scaler.transform(self.buffer)
 
         # Lấy subset sensor cho LSTM
         sensor_indices = [self.features_list.index(s) for s in self.sensor_list]
         lstm_input = scaled_data[:, sensor_indices]
-        lstm_input_reshaped = lstm_input.reshape(1, self.seq_length, -1)
+        
+        # Reshape cho Keras LSTM (batch_size, seq_len, features)
+        lstm_input_reshaped = lstm_input.reshape(1, self.seq_length, -1).astype(np.float32)
 
-        # Dự đoán RUL
-        prediction = self.model.predict(lstm_input_reshaped, verbose=0)
-        self.current_rul = float(prediction.flatten()[0])
+        # Dự đoán RUL: Gọi trực tiếp __call__ thay vì predict() để bỏ qua setup overhead
+        # training=False giúp tăng tốc và đảm bảo không kích hoạt Dropout/BatchNorm
+        prediction = self.model(lstm_input_reshaped, training=False)
+        self.current_rul = float(prediction.numpy().flatten()[0])
 
         # Cập nhật trạng thái
         if self.current_rul < 20:
@@ -87,6 +97,7 @@ class AircraftDigitalTwin:
         self.fuel = fuel_capacity
         self.altitude = 10000.0
         self.velocity = 250.0
-        self.buffer = []
+        self.buffer.fill(0)
+        self.buffer_filled = 0
         self.status = "HEALTHY"
         self.current_rul = None

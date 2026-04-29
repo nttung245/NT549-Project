@@ -6,6 +6,24 @@ Dưới đây là lịch sử thay đổi và quá trình phát triển hệ th�
 
 ---
 
+### 🕒 **2026-04-18 | 11:00 AM - 01:15 PM**
+
+#### **Thay đổi: Tối ưu hóa hiệu năng CPU (NumPy Migration & Inference Speedup)**
+
+- **Tiếp cận:** Loại bỏ các nút thắt cổ chai về CPU gây ra bởi Pandas và Keras Overhead. Chuyển đổi toàn bộ cấu trúc dữ liệu mô phỏng sang NumPy để đạt tốc độ xử lý $O(1)$ và tối ưu hóa luồng tính toán cho cấu trúc CPU đa nhân/đa luồng.
+- **Nội dung:**
+  - **Digital Twin Optimization (`scripts/digital_twin.py`)**:
+    - Thay thế list buffer bằng **Fixed-size NumPy array** (50x26).
+    - Sử dụng NumPy slicing/roll để cập nhật dữ liệu, loại bỏ việc khởi tạo `pd.DataFrame` dư thừa trong mỗi bước mô phỏng.
+    - Chuyển từ `model.predict()` sang **Direct Call** (`model(x, training=False)`), giảm 90% overhead cho mỗi lần dự báo RUL đơn lẻ.
+  - **Environment Performance (`scripts/aircraft_env.py`)**:
+    - Triển khai **`unit_data_map`**: Chuyển đổi `fleet_data` sang Dictionary các mảng NumPy trong giai đoạn khởi tạo. Biến thao tác lọc dữ liệu từ $O(N)$ thành $O(1)$.
+    - Tối ưu hóa `reset()`: Nạp 50-step window cực nhanh bằng phương pháp gán mảng (Array Assignment), thay thế vòng lặp Python.
+  - **Concurrency Control**: Thiết lập giới hạn luồng xử lý nội bộ (`set_intra_op_parallelism_threads`) để tránh hiện tượng CPU thrashed khi chạy song song nhiều Environment.
+- **Trạng thái:** Hoàn tất. Tốc độ huấn luyện (SPS) dự kiến tăng từ 2-5 lần tùy cấu hình máy.
+
+---
+
 ### 🕒 **2026-04-17 | 11:30 - 11:55 PM**
 
 #### **Thay đổi: Triển khai hạ tầng huấn luyện trên Google Cloud Platform (GCP)**

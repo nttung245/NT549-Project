@@ -6,7 +6,7 @@ resource "google_compute_instance" "training_vm" {
 
   boot_disk {
     initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2204-lts"
+      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"
       size  = 50 # 50GB disk
     }
   }
@@ -42,9 +42,24 @@ resource "google_compute_firewall" "allow_mlflow" {
   target_tags   = ["mlflow"]
 }
 
+# Firewall rule to allow SSH traffic
+resource "google_compute_firewall" "allow_ssh" {
+  name    = "allow-ssh"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["0.0.0.0/0"] # Consider restricting to your IP for better security.
+  target_tags   = ["ssh"]
+}
+
 # Bucket to store site/artifacts
 resource "google_storage_bucket" "artifacts" {
   name     = "rl-artifacts-${var.gcp_project}"
   location = var.gcp_region
   force_destroy = true
+  uniform_bucket_level_access = true
 }
