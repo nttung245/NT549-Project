@@ -25,7 +25,7 @@ resource "google_compute_instance" "training_vm" {
     scopes = ["cloud-platform"]
   }
 
-  tags = ["mlflow", "ssh"]
+  tags = ["mlflow", "ssh", "web"]
 }
 
 # Firewall rule to allow MLflow traffic
@@ -42,9 +42,9 @@ resource "google_compute_firewall" "allow_mlflow" {
   target_tags   = ["mlflow"]
 }
 
-# Firewall rule to allow SSH traffic
-resource "google_compute_firewall" "allow_ssh" {
-  name    = "allow-ssh"
+# Firewall rule to allow SSH traffic via IAP
+resource "google_compute_firewall" "allow_ssh_iap" {
+  name    = "allow-ssh-iap"
   network = "default"
 
   allow {
@@ -52,8 +52,23 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = ["0.0.0.0/0"] # Consider restricting to your IP for better security.
+  # Allow only Google IAP tunnel IP range
+  source_ranges = ["35.235.240.0/20"]
   target_tags   = ["ssh"]
+}
+
+# Firewall rule to allow HTTP/Web traffic
+resource "google_compute_firewall" "allow_web" {
+  name    = "allow-web"
+  network = "default"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "8080"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["web"]
 }
 
 # Bucket to store site/artifacts
