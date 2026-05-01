@@ -70,3 +70,6 @@ Sau các lần chạy huấn luyện trước, Agent PPO bị plateau ở ~500 s
 ### Khuyến Nghị Hyperparameter (demo_flow.ipynb)
 * Dùng **LR cố định `3e-4`** thay vì `linear_schedule` để đảm bảo LR vẫn đủ lớn khi Agent khám phá ra hành vi tốt ở giữa/cuối training.
 * Giữ `ent_coef=0.05` để duy trì Exploration đủ lâu.
+
+### Quản lý Repository
+* Cập nhật `.gitignore`: Bổ sung `logs/` và `mlruns/` để loại bỏ các file kết quả huấn luyện nặng nề khỏi Git.

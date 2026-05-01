@@ -29,20 +29,15 @@ class AircraftDigitalTwin:
     """
 
     def __init__(self, engine_id, model, scaler, seq_length=SEQUENCE_LENGTH,
-                 features_list=None, sensor_list=None, fuel_capacity=100.0):
+                 features_list=None, sensor_list=None, fuel_capacity=100.0, predict_fn=None):
         self.engine_id = engine_id
         self.model = model
         self.scaler = scaler
         self.seq_length = seq_length
         self.features_list = features_list or FEATURES
         self.sensor_list = sensor_list or KEY_SENSORS
+        self.predict_fn = predict_fn
         
-        # Optimize prediction to prevent TensorArray warnings in eager mode
-        @tf.function(reduce_retracing=True)
-        def _fast_predict(x):
-            return self.model(x, training=False)
-        self._predict_fn = _fast_predict
-
         # Thông số vật lý
         self.altitude = 10000.0   # Độ cao bay đường trường (m)
         self.velocity = 250.0     # Vận tốc (m/s)
@@ -86,8 +81,12 @@ class AircraftDigitalTwin:
         # Reshape cho Keras LSTM (batch_size, seq_len, features)
         lstm_input_reshaped = lstm_input.reshape(1, self.seq_length, -1).astype(np.float32)
 
-        # Dự đoán RUL: Sử dụng hàm _predict_fn đã được tối ưu hóa với @tf.function
-        prediction = self._predict_fn(lstm_input_reshaped)
+        # Dự đoán RUL: Dùng hàm đã compile C++ (tf.function) từ Env truyền vào
+        if self.predict_fn is not None:
+            prediction = self.predict_fn(lstm_input_reshaped)
+        else:
+            prediction = self.model(lstm_input_reshaped, training=False)
+            
         self.current_rul = float(prediction.numpy().flatten()[0])
 
         # Cập nhật trạng thái
