@@ -8,6 +8,10 @@ Refactored from RocketDigitalTwin → AircraftDigitalTwin.
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import warnings
+
+# Suppress warnings from sklearn about feature names when predicting with numpy arrays
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 # Tối ưu hóa Threading cho CPU: Tránh tranh chấp tài nguyên khi chạy nhiều Env song song
 # Điều này cực kỳ quan trọng khi chạy 4-8 Env trên CPU 4 nhân / 16 luồng
@@ -32,6 +36,12 @@ class AircraftDigitalTwin:
         self.seq_length = seq_length
         self.features_list = features_list or FEATURES
         self.sensor_list = sensor_list or KEY_SENSORS
+        
+        # Optimize prediction to prevent TensorArray warnings in eager mode
+        @tf.function(reduce_retracing=True)
+        def _fast_predict(x):
+            return self.model(x, training=False)
+        self._predict_fn = _fast_predict
 
         # Thông số vật lý
         self.altitude = 10000.0   # Độ cao bay đường trường (m)
@@ -66,9 +76,8 @@ class AircraftDigitalTwin:
             self.status = "COLLECTING_DATA"
             return None
 
-        # Tiền xử lý: Scale trực tiếp từ NumPy array (Bỏ qua pd.DataFrame để tăng tốc)
-        # scaler.transform nhận (n_samples, n_features)
-        scaled_data = self.scaler.transform(self.buffer)
+        # Tiền xử lý: Scale thủ công để tối đa tốc độ (Bỏ qua sklearn transform overhead và warnings)
+        scaled_data = (self.buffer - self.scaler.mean_) / self.scaler.scale_
 
         # Lấy subset sensor cho LSTM
         sensor_indices = [self.features_list.index(s) for s in self.sensor_list]
@@ -77,9 +86,8 @@ class AircraftDigitalTwin:
         # Reshape cho Keras LSTM (batch_size, seq_len, features)
         lstm_input_reshaped = lstm_input.reshape(1, self.seq_length, -1).astype(np.float32)
 
-        # Dự đoán RUL: Gọi trực tiếp __call__ thay vì predict() để bỏ qua setup overhead
-        # training=False giúp tăng tốc và đảm bảo không kích hoạt Dropout/BatchNorm
-        prediction = self.model(lstm_input_reshaped, training=False)
+        # Dự đoán RUL: Sử dụng hàm _predict_fn đã được tối ưu hóa với @tf.function
+        prediction = self._predict_fn(lstm_input_reshaped)
         self.current_rul = float(prediction.numpy().flatten()[0])
 
         # Cập nhật trạng thái
