@@ -48,11 +48,12 @@ class AircraftEnv(gym.Env):
     CLIMB_RATE = 1000.0       # Tốc độ tăng độ cao (m/cycle)
     MAX_ALTITUDE = 12000.0    # Độ cao tối đa cho phép
     
-    LANDING_THRESHOLD = 400.0 # Khoảng cách tối đa từ máy bay đến cụm sân bay phụ / điểm đáp
+    LANDING_THRESHOLD = 300.0 # Khoảng cách tối đa từ máy bay đến cụm sân bay phụ / điểm đáp
+    MAX_STEPS = 1000          # Giới hạn số bước tối đa để tránh vòng lặp vô hạn
     FUEL_RATE = 0.5           # Nhiên liệu tiêu hao cơ bản mỗi cycle
     TOTAL_DISTANCE = 20000.0  # Tổng quãng đường bay (đơn vị)
     NUM_SUB_AIRPORTS = 6      # Số sân bay phụ trên đường bay
-    FUEL_CAPACITY = 300.0     # Dung tích nhiên liệu tối đa
+    FUEL_CAPACITY = 250.0     # Dung tích nhiên liệu tối đa
 
     def __init__(self, fleet_data: pd.DataFrame, model_path: str, scaler,
                  sensor_list: list = None, features_list: list = None):
@@ -77,9 +78,17 @@ class AircraftEnv(gym.Env):
         import tensorflow as tf
         try:
             self.model = tf.keras.models.load_model(model_path)
+            
+            # Khai báo tf.function MỘT LẦN DUY NHẤT để tránh lỗi Retracing và tăng tốc x10
+            @tf.function(reduce_retracing=True)
+            def fast_predict(x):
+                return self.model(x, training=False)
+            self._fast_predict_fn = fast_predict
+            
         except Exception as e:
             print(f"⚠️ Error loading model in environment: {e}")
             self.model = None
+            self._fast_predict_fn = None
 
         # ── Spaces ──────────────────────────────────────────────
         # Action 0: CRUISE (Maintain altitude)
@@ -136,7 +145,8 @@ class AircraftEnv(gym.Env):
         self.twin = AircraftDigitalTwin(
             engine_id=unit_id, model=self.model, scaler=self.scaler,
             seq_length=SEQUENCE_LENGTH, features_list=self.features_list,
-            sensor_list=self.sensor_list, fuel_capacity=self.FUEL_CAPACITY
+            sensor_list=self.sensor_list, fuel_capacity=self.FUEL_CAPACITY,
+            predict_fn=self._fast_predict_fn
         )
 
         # Nạp các cycle đầu vào buffer trong twin (Sử dụng NumPy slicing - Cực nhanh)
@@ -154,13 +164,15 @@ class AircraftEnv(gym.Env):
         self.twin.altitude = 0.0  # Bắt đầu từ mặt đất
         self.twin.velocity = 0.0
         self.flight_phase = "GROUNDED"
+        self.current_step = 0
+        self.dist_since_last_maintenance = 0.0  # Khoảng cách đã bay kể từ lần bảo trì gần nhất
 
         # Chia lộ trình thành các phân đoạn, đặt ngẫu nhiên sân bay (giới hạn độ lệch để tránh khoảng cách quá lớn)
         base_points = [2857.0, 5714.0, 8571.0, 11428.0, 14285.0, 17142.0]
         self.sub_airports = []
         for base in base_points:
-            # Noise ngẫu nhiên từ -500 đến +500 xung quanh mốc
-            noise = self.np_random.uniform(-500.0, 500.0)
+            # Noise ngẫu nhiên từ -200 đến +200 xung quanh mốc
+            noise = self.np_random.uniform(-200.0, 200.0)
             self.sub_airports.append(base + noise)
         
         # Sort theo vị trí để observation index nhất quán
@@ -173,6 +185,7 @@ class AircraftEnv(gym.Env):
     # Step
     # ================================================================
     def step(self, action):
+        self.current_step += 1
         done = False
         truncated = False
         reward = 0.0
@@ -198,7 +211,7 @@ class AircraftEnv(gym.Env):
             self.twin.velocity = 0.0
             distance_covered = 0.0
             fuel_spent = 0.1
-            reward -= 0.5  # Phạt vì nổ máy nằm im không cất cánh
+            reward -= 2.0  # Phạt nặng vì nổ máy nằm im không cất cánh
         else:
             # Đang bay hoặc đang cất cánh
             if action == 0:
@@ -224,12 +237,13 @@ class AircraftEnv(gym.Env):
                 distance_covered = self.V_CLIMB
                 fuel_spent = self.FUEL_RATE * 1.5
 
-            # Base step reward khuyến khích tiến lên
-            reward += 0.05
+            # Base step reward khuyến khích tiến lên (Reward Shaping)
+            reward += (distance_covered / 1000.0)
             reward -= 0.01  # Time penalty
 
         # 4. Cập nhật trạng thái vật lý
         self.distance_to_destination -= distance_covered
+        self.dist_since_last_maintenance += distance_covered  # Cộng dồn quãng đường bay
         self.twin.fuel -= fuel_spent
         self.twin.fuel = max(0.0, self.twin.fuel)
         self.twin.altitude = np.clip(self.twin.altitude, 0, self.MAX_ALTITUDE)
@@ -256,11 +270,16 @@ class AircraftEnv(gym.Env):
                     info['event'] = "ARRIVED"
                 else:
                     # Hạ cánh bảo trì tại sân bay phụ
-                    # RUL càng thấp, reward càng cao. Max ~25 điểm nếu RUL gần 0.
-                    # Nếu RUL cao (nhát gan hạ cánh sớm), reward thấp (ví dụ: 10 điểm).
-                    maintenance_reward = 10.0 + max(0.0, (150.0 - current_rul) * 0.1)
+                    # Thưởng tỷ lệ với quãng đường đã bay từ lần bảo trì trước
+                    # → Ngăn Agent "farm" bằng cách climb/descend tại chỗ (chỉ ~35m)
+                    # → Khuyến khích bay đủ xa rồi mới bảo trì
+                    progress_bonus = min(self.dist_since_last_maintenance / 100.0, 30.0)  # 0 đến +30
+                    rul_bonus = max(0.0, (80.0 - current_rul) * 0.3)         # 0 đến +24 (khi RUL < 80)
+                    fuel_bonus = max(0.0, (1.0 - self.twin.fuel / self.FUEL_CAPACITY) * 15.0)  # 0 đến +15
+                    maintenance_reward = progress_bonus + rul_bonus + fuel_bonus  # Luôn >= 0
                     reward += maintenance_reward
 
+                    self.dist_since_last_maintenance = 0.0  # Reset khoảng cách sau mỗi lần bảo trì
                     self._reset_to_new_engine()
                     # Snap vị trí về sân bay phụ đã hạ cánh
                     landed_ap = min(self.sub_airports, key=lambda p: abs(p - current_pos))
@@ -270,7 +289,7 @@ class AircraftEnv(gym.Env):
                     info['rul_at_landing'] = current_rul
             else:
                 # Rớt máy bay (Hạ cánh giữa đường)
-                reward -= 20.0
+                reward -= 40.0
                 done = True
                 info['event'] = "FIELD_CRASH"
 
@@ -278,14 +297,19 @@ class AircraftEnv(gym.Env):
         # Chỉ kiểm tra nếu chưa hoàn thành (ví dụ đã hạ cánh thành công)
         if not done:
             if self.twin.fuel <= 0:
-                reward -= 20.0
+                reward -= 40.0
                 done = True
                 info['event'] = "FUEL_EMPTY"
 
             elif current_rul <= 0:
-                reward -= 50.0
+                reward -= 40.0
                 done = True
                 info['event'] = "CRASHED"
+
+        # Kiểm tra timeout (vượt quá MAX_STEPS)
+        if self.current_step >= self.MAX_STEPS:
+            truncated = True
+            info['event'] = "TIMEOUT"
 
         # Trả về Observation mới
         obs = self._get_obs()
