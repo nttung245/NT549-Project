@@ -1,8 +1,0 @@
-artifact_location: /mlruns/138440030595181525
-creation_time: 1775547335373
-experiment_id: '138440030595181525'
-last_update_time: 1775549727853
-lifecycle_stage: deleted
-name: Aircraft_RL_Optimization
-tags: {}
-workspace: default
