@@ -48,8 +48,8 @@ class AircraftEnv(gym.Env):
     CLIMB_RATE = 1000.0       # Tốc độ tăng độ cao (m/cycle)
     MAX_ALTITUDE = 12000.0    # Độ cao tối đa cho phép
     
-    LANDING_THRESHOLD = 500.0 # Tăng từ 300 → 500 để cửa sổ hạ cánh rộng hơn
-    APPROACH_DISTANCE = 1500.0 # Khoảng cách để bắt đầu approach (dense reward zone)
+    LANDING_THRESHOLD = 400.0 # Đủ rộng cho quãng đường lướt 360m khi hạ từ 12000m
+    APPROACH_DISTANCE = 800.0 # Vùng nhận approach reward tương ứng với cửa sổ hạ cánh
     MAX_STEPS = 2000          # Tăng từ 1000 → 2000 (vì DESCEND_RATE giảm cần nhiều step hơn)
     FUEL_RATE = 0.5           # Nhiên liệu tiêu hao cơ bản mỗi cycle
     TOTAL_DISTANCE = 20000.0  # Tổng quãng đường bay (đơn vị)
@@ -215,13 +215,19 @@ class AircraftEnv(gym.Env):
         # Kiểm tra xem máy bay có đang ở trên không không
         was_in_air = self.twin.altitude > 0
 
+        # Tính toán hiệu suất bay dựa trên độ cao hiện tại
+        # Càng cao bay càng nhanh và càng tiết kiệm nhiên liệu
+        altitude_ratio = self.twin.altitude / self.MAX_ALTITUDE
+        current_v_cruise = 25.0 + altitude_ratio * 15.0  # 25.0 -> 40.0
+        current_fuel_rate = 0.5 - altitude_ratio * 0.2   # 0.5 -> 0.3
+
         # 3. Xử lý Hành động
         if action == 0:
-        # ── CRUISE: Giữ độ cao, Tốc độ cao ──
+        # ── CRUISE: Giữ độ cao, Tốc độ tỷ lệ với độ cao ──
             self.flight_phase = "CRUISING"
-            self.twin.velocity = self.V_CRUISE
-            distance_covered = self.V_CRUISE
-            fuel_spent = self.FUEL_RATE
+            self.twin.velocity = current_v_cruise
+            distance_covered = current_v_cruise
+            fuel_spent = current_fuel_rate
 
         elif action == 1:
         # ── DESCEND: Hạ độ cao, Tốc độ thấp ──
@@ -229,7 +235,7 @@ class AircraftEnv(gym.Env):
             self.twin.altitude -= self.DESCEND_RATE
             self.twin.velocity = self.V_DESCEND
             distance_covered = self.V_DESCEND
-            fuel_spent = self.FUEL_RATE
+            fuel_spent = current_fuel_rate
 
         elif action == 2:
         # ── CLIMB: Tăng độ cao, Tốc độ trung bình, Tốn xăng hơn ──
@@ -237,7 +243,7 @@ class AircraftEnv(gym.Env):
             self.twin.altitude += self.CLIMB_RATE
             self.twin.velocity = self.V_CLIMB
             distance_covered = self.V_CLIMB
-            fuel_spent = self.FUEL_RATE * 1.5
+            fuel_spent = current_fuel_rate * 1.5
 
         # Base step reward khuyến khích tiến lên (Reward Shaping)
         reward += (distance_covered / 1000.0)
@@ -271,12 +277,13 @@ class AircraftEnv(gym.Env):
             if action == 1:  # DESCEND trong approach zone → thưởng mạnh
                 approach_reward = 0.5 * (1.0 - dist_to_next_target / self.APPROACH_DISTANCE)
                 reward += approach_reward
-            elif action == 2:  # CLIMB khi đang gần sân bay → phạt nhẹ
-                reward -= 0.15
+            # Bỏ penalty cho CLIMB/CRUISE để Agent tự quyết định có nên skip sân bay hay không
 
         # 6. KIỂM TRA ĐÁP ĐẤT (Chỉ kiểm tra nếu vừa đáp từ trên không xuống)
         if was_in_air and self.twin.altitude <= 0:
-            at_airport = dist_nearest_abs <= self.LANDING_THRESHOLD
+            # Chỉ cho phép đáp nếu đã bay đủ xa (tránh farm điểm tại chỗ)
+            valid_flight = self.dist_since_last_maintenance >= 1000.0
+            at_airport = (dist_nearest_abs <= self.LANDING_THRESHOLD) and valid_flight
             at_destination = self.distance_to_destination <= self.LANDING_THRESHOLD
 
             if at_airport or at_destination:

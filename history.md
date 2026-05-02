@@ -1,5 +1,26 @@
 # Nhật ký Thay đổi Dự án (Project History)
 
+## [2026-05-02] - Tối ưu Vật lý bay theo Độ cao (Altitude-Dependent Physics) & Hạ cánh Chuẩn xác
+
+### Bối Cảnh
+Agent học được cách bay cơ bản, nhưng không bao giờ bay lên độ cao tối đa (12000m) vì bị phạt tốc độ và xăng. Đồng thời, `APPROACH_DISTANCE` quá rộng (1500m) kết hợp `LANDING_THRESHOLD` hẹp khiến Agent dễ dàng bị FIELD_CRASH trong lúc đánh giá (eval) khi áp dụng deterministic policy.
+
+### Thay Đổi Trong `scripts/aircraft_env.py`
+
+#### 1. Đưa Vật lý thực tế vào Game (Tạo incentive leo cao)
+Thay vì các hằng số cố định, tốc độ và tiêu thụ nhiên liệu giờ thay đổi tuyến tính theo độ cao (càng cao, không khí càng loãng, bay càng nhanh và ít tốn xăng):
+*   `V_CRUISE`: Tính từ 25 m/step (ở 0m) lên tới **40 m/step** (ở 12000m).
+*   `FUEL_RATE`: Tính từ 0.5 xăng/step (ở 0m) giảm còn **0.3 xăng/step** (ở 12000m).
+*   **Kết quả:** Agent sẽ tự động học được chiến lược CLIMB lên độ cao tối đa ngay từ đầu chặng để tận dụng quãng đường và xăng, giúp nó vượt qua nhiều sân bay hơn.
+
+#### 2. Tinh chỉnh Cửa sổ Hạ cánh (Landing Window)
+Để hạ cánh từ 12000m xuống, máy bay mất 24 steps, lướt ngang một đoạn 360m. Do đó:
+*   `LANDING_THRESHOLD`: Chỉnh từ 500m thành **400m** (Đủ không gian để chứa sai số hạ cánh từ 12000m).
+*   `APPROACH_DISTANCE`: Chỉnh từ 1500m thành **800m** (Sửa lỗi "Bẫy 1500m" khiến máy bay đâm xuống đất quá sớm).
+
+#### 3. Bỏ hình phạt khi Skip sân bay
+Loại bỏ hoàn toàn hình phạt `-0.15` cho các hành động `CLIMB` hay `CRUISE` bên trong Approach Zone. Agent được toàn quyền quyết định bỏ qua sân bay dựa vào lượng Fuel và RUL còn lại thay vì bị ép phải đáp mọi lúc mọi nơi.
+
 ## [2026-05-02] - Fix Agent Không Học Được Cách Hạ Cánh (Dense Approach Reward + Simplified Startup)
 
 ### Bối Cảnh
