@@ -1,5 +1,75 @@
 # Nhật ký Thay đổi Dự án (Project History)
 
+## [2026-05-02] - Fix Agent Không Học Được Cách Hạ Cánh (Dense Approach Reward + Simplified Startup)
+
+### Bối Cảnh
+Sau ~1M steps training, Agent PPO vẫn **không bao giờ hạ cánh thành công** khi đánh giá (eval):
+- `rollout/ep_rew_mean` (stochastic) tăng lên > 0 → Agent **tình cờ** hạ cánh được khi exploration ngẫu nhiên
+- `eval/mean_reward` (deterministic) vẫn ~-33 → Policy chưa hội tụ, deterministic action luôn chọn CRUISE → hết xăng → chết
+- `train/entropy_loss` tiến về 0 → Agent mất khả năng exploration quá sớm
+
+### Chẩn Đoán Gốc Rễ
+1. **Sparse Reward:** Reward cho hạ cánh chỉ đến SAU KHI thành công → Agent không bao giờ nhận được "hint" để học
+2. **Không có Guidance Signal:** Không có reward nào hướng dẫn "nên DESCEND khi gần sân bay"
+3. **Khởi tạo từ mặt đất:** Agent phải học cả cất cánh lẫn hạ cánh cùng lúc → quá phức tạp
+4. **Entropy quá thấp:** `ent_coef=0.01` khiến agent mất exploration trước khi tìm được hành vi tốt
+
+### Thay Đổi Trong `scripts/aircraft_env.py`
+
+#### 1. Thêm Dense Approach Reward (Thay đổi quan trọng nhất)
+Thêm hằng số `APPROACH_DISTANCE = 1500.0` và logic reward liên tục:
+```
+Khi agent trong vùng tiếp cận (dist_to_next_target ≤ 1500m):
+  - DESCEND → thưởng +0.5 * (1 - dist/1500)  (càng gần càng thưởng nhiều)
+  - CLIMB   → phạt -0.15
+```
+→ Agent nhận được signal liên tục "nên hạ cánh khi gần sân bay" thay vì phải tình cờ khám phá.
+
+#### 2. Giảm `DESCEND_RATE`: 1000 → 500 m/cycle
+* Hạ cánh từ từ hơn, cho agent nhiều step để "canh" đúng vị trí sân bay.
+* Từ altitude 2000m cần 4 steps DESCEND (mỗi step bay 15m = 60m) — vẫn trong LANDING_THRESHOLD.
+
+#### 3. Tăng `LANDING_THRESHOLD`: 300 → 500 m
+* Cửa sổ hạ cánh rộng hơn, tăng xác suất hạ cánh thành công.
+
+#### 4. Tăng `MAX_STEPS`: 1000 → 2000
+* Cho agent thêm thời gian (vì DESCEND_RATE giảm nên cần nhiều step hơn cho mỗi lần hạ cánh).
+
+#### 5. Khởi tạo altitude = 2000 (thay vì 0)
+* Bỏ hoàn toàn giai đoạn "học cất cánh", agent bắt đầu ở trạng thái CRUISING.
+* Đơn giản hóa bài toán, cho phép tập trung vào: **bay → tiếp cận → hạ cánh → bảo trì → bay tiếp**.
+* Tương tự trong `_reset_to_new_engine()`: sau bảo trì cũng bắt đầu ở altitude 2000.
+
+#### 6. Loại bỏ logic "cất cánh từ mặt đất"
+* Xóa branch `if not was_in_air and action in [0, 1]` (Idle penalty).
+* Action luôn được xử lý bình thường (CRUISE/DESCEND/CLIMB).
+
+#### 7. Thêm TIMEOUT penalty: -20.0
+* Khi vượt MAX_STEPS, agent bị phạt -20 thay vì chỉ truncated.
+* Ngăn agent "lười biếng" bay cho đến timeout.
+
+#### 8. Observation Space: 11 chiều (Redesign)
+Loại bỏ `Velocity` (deterministic theo action, không cần thiết), thêm `In_Approach_Zone`:
+```
+[Altitude, Fuel, RUL,
+ SignedDist_AP1..AP6 (6 giá trị, âm=đã qua, dương=phía trước),
+ Dist_to_Destination,
+ In_Approach_Zone (1.0 nếu trong APPROACH_DISTANCE)]
+```
+Giữ nguyên 6 signed distances để agent có đầy đủ thông tin cho chiến lược nhiên liệu (biết khoảng cách đến tất cả sân bay → quyết định bỏ qua hay dừng bảo trì).
+
+### Thay Đổi Trong `scripts/train_ppo.py`
+
+#### 1. Tăng `ent_coef`: 0.01 → 0.05
+* Duy trì exploration đủ lâu để agent khám phá hành vi hạ cánh.
+
+#### 2. Tăng `total_timesteps`: 500,000 → 1,000,000
+* Train lâu hơn với dense reward shaping mới.
+
+### Lưu Ý
+* Observation space đã thay đổi → **KHÔNG** tương thích model cũ, phải train lại từ đầu.
+* Cần monitor: event "MAINTAINED" và "ARRIVED" xuất hiện trong training logs.
+
 ## [Current Version] - Nâng cấp Môi trường AircraftEnv (Single-Agent)
 
 Trong giai đoạn này, chúng ta đã tinh chỉnh môi trường Reinforcement Learning để phản ánh vật lý bay thực tế và loại bỏ các yếu tố "cầm tay chỉ việc", giúp PPO Agent tự chủ hơn:

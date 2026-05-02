@@ -44,12 +44,13 @@ class AircraftEnv(gym.Env):
     V_DESCEND = 15.0          # Tốc độ ngang khi rà xuống (m/cycle)
     V_CLIMB = 20.0            # Tốc độ ngang khi leo cao (m/cycle)
     
-    DESCEND_RATE = 1000.0     # Tốc độ giảm độ cao (m/cycle)
+    DESCEND_RATE = 500.0      # Tốc độ giảm độ cao (m/cycle) — giảm từ 1000 để hạ cánh từ từ hơn
     CLIMB_RATE = 1000.0       # Tốc độ tăng độ cao (m/cycle)
     MAX_ALTITUDE = 12000.0    # Độ cao tối đa cho phép
     
-    LANDING_THRESHOLD = 300.0 # Khoảng cách tối đa từ máy bay đến cụm sân bay phụ / điểm đáp
-    MAX_STEPS = 1000          # Giới hạn số bước tối đa để tránh vòng lặp vô hạn
+    LANDING_THRESHOLD = 500.0 # Tăng từ 300 → 500 để cửa sổ hạ cánh rộng hơn
+    APPROACH_DISTANCE = 1500.0 # Khoảng cách để bắt đầu approach (dense reward zone)
+    MAX_STEPS = 2000          # Tăng từ 1000 → 2000 (vì DESCEND_RATE giảm cần nhiều step hơn)
     FUEL_RATE = 0.5           # Nhiên liệu tiêu hao cơ bản mỗi cycle
     TOTAL_DISTANCE = 20000.0  # Tổng quãng đường bay (đơn vị)
     NUM_SUB_AIRPORTS = 6      # Số sân bay phụ trên đường bay
@@ -92,23 +93,33 @@ class AircraftEnv(gym.Env):
 
         # ── Spaces ──────────────────────────────────────────────
         # Action 0: CRUISE (Maintain altitude)
-        # Action 1: DESCEND (Altitude -1000)
-        # Action 2: CLIMB (Altitude +1000)
+        # Action 1: DESCEND (Altitude -500/cycle)
+        # Action 2: CLIMB (Altitude +1000/cycle)
         self.action_space = spaces.Discrete(3)
 
-        # 10-dim: [Altitude, Velocity, Fuel, RUL,
-        #          SignedDist_AP1..5 (sorted by pos), Dist_Destination]
-        n_ap = self.NUM_SUB_AIRPORTS  # 5
+        # Observation Space 11-dim:
+        # [Altitude, Fuel, RUL,
+        #  SignedDist_AP1..AP6 (sorted by position; âm=đã qua, dương=phía trước),
+        #  Dist_to_Destination,
+        #  In_Approach_Zone (1 nếu đang trong APPROACH_DISTANCE của sân bay tiếp theo)]
+        #
+        # Ghi chú: Velocity được loại bỏ vì nó luôn cố định theo action (CRUISE/DESCEND/CLIMB).
+        # Agent có thể suy ra Velocity từ action nó đã chọn.
+        #
+        # Với 6 signed distances, agent có đầy đủ thông tin để:
+        # - Biết khoảng cách đến từng sân bay phía trước
+        # - So sánh nhiên liệu hiện có vs khoảng cách để quyết định bỏ qua sân bay này hay không
+        n_ap = self.NUM_SUB_AIRPORTS  # 6
         low = np.array(
-            [0.0, 0.0, 0.0, 0.0] +
-            [-self.TOTAL_DISTANCE] * n_ap +   # Signed: can be negative (behind)
-            [0.0],
+            [0.0, 0.0, 0.0] +                         # Altitude, Fuel, RUL
+            [-self.TOTAL_DISTANCE] * n_ap +            # SignedDist_AP1..6 (có thể âm)
+            [0.0, 0.0],                               # Dist_Destination, In_Approach_Zone
             dtype=np.float32
         )
         high = np.array(
-            [self.MAX_ALTITUDE, 1000.0, self.FUEL_CAPACITY, 300.0] +  # Altitude bound fix
+            [self.MAX_ALTITUDE, self.FUEL_CAPACITY, 300.0] +
             [self.TOTAL_DISTANCE] * n_ap +
-            [self.TOTAL_DISTANCE],
+            [self.TOTAL_DISTANCE, 1.0],               # Dist_Destination, In_Approach_Zone
             dtype=np.float32
         )
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
@@ -161,9 +172,9 @@ class AircraftEnv(gym.Env):
         # Khởi tạo hành trình
         self.distance_to_destination = self.TOTAL_DISTANCE
         self.twin.fuel = self.FUEL_CAPACITY
-        self.twin.altitude = 0.0  # Bắt đầu từ mặt đất
-        self.twin.velocity = 0.0
-        self.flight_phase = "GROUNDED"
+        self.twin.altitude = 2000.0  # Bắt đầu trên không (tránh giai đoạn học cất cánh)
+        self.twin.velocity = self.V_CRUISE
+        self.flight_phase = "CRUISING"  # Bắt đầu đã ở trạng thái CRUISING
         self.current_step = 0
         self.dist_since_last_maintenance = 0.0  # Khoảng cách đã bay kể từ lần bảo trì gần nhất
 
@@ -205,41 +216,32 @@ class AircraftEnv(gym.Env):
         was_in_air = self.twin.altitude > 0
 
         # 3. Xử lý Hành động
-        if not was_in_air and action in [0, 1]:
-            # Đang ở mặt đất mà không chịu cất cánh (Cruise hoặc Descend)
-            self.flight_phase = "GROUNDED"
-            self.twin.velocity = 0.0
-            distance_covered = 0.0
-            fuel_spent = 0.1
-            reward -= 2.0  # Phạt nặng vì nổ máy nằm im không cất cánh
-        else:
-            # Đang bay hoặc đang cất cánh
-            if action == 0:
-            # ── CRUISE: Giữ độ cao, Tốc độ cao ──
-                self.flight_phase = "CRUISING"
-                self.twin.velocity = self.V_CRUISE
-                distance_covered = self.V_CRUISE
-                fuel_spent = self.FUEL_RATE
+        if action == 0:
+        # ── CRUISE: Giữ độ cao, Tốc độ cao ──
+            self.flight_phase = "CRUISING"
+            self.twin.velocity = self.V_CRUISE
+            distance_covered = self.V_CRUISE
+            fuel_spent = self.FUEL_RATE
 
-            elif action == 1:
-            # ── DESCEND: Hạ độ cao, Tốc độ thấp ──
-                self.flight_phase = "DESCENDING"
-                self.twin.altitude -= self.DESCEND_RATE
-                self.twin.velocity = self.V_DESCEND
-                distance_covered = self.V_DESCEND
-                fuel_spent = self.FUEL_RATE
+        elif action == 1:
+        # ── DESCEND: Hạ độ cao, Tốc độ thấp ──
+            self.flight_phase = "DESCENDING"
+            self.twin.altitude -= self.DESCEND_RATE
+            self.twin.velocity = self.V_DESCEND
+            distance_covered = self.V_DESCEND
+            fuel_spent = self.FUEL_RATE
 
-            elif action == 2:
-            # ── CLIMB: Tăng độ cao, Tốc độ trung bình, Tốn xăng hơn ──
-                self.flight_phase = "CLIMBING"
-                self.twin.altitude += self.CLIMB_RATE
-                self.twin.velocity = self.V_CLIMB
-                distance_covered = self.V_CLIMB
-                fuel_spent = self.FUEL_RATE * 1.5
+        elif action == 2:
+        # ── CLIMB: Tăng độ cao, Tốc độ trung bình, Tốn xăng hơn ──
+            self.flight_phase = "CLIMBING"
+            self.twin.altitude += self.CLIMB_RATE
+            self.twin.velocity = self.V_CLIMB
+            distance_covered = self.V_CLIMB
+            fuel_spent = self.FUEL_RATE * 1.5
 
-            # Base step reward khuyến khích tiến lên (Reward Shaping)
-            reward += (distance_covered / 1000.0)
-            reward -= 0.01  # Time penalty
+        # Base step reward khuyến khích tiến lên (Reward Shaping)
+        reward += (distance_covered / 1000.0)
+        reward -= 0.01  # Time penalty
 
         # 4. Cập nhật trạng thái vật lý
         self.distance_to_destination -= distance_covered
@@ -251,11 +253,26 @@ class AircraftEnv(gym.Env):
         # Vị trí hiện tại SAU khi di chuyển
         current_pos = self.TOTAL_DISTANCE - self.distance_to_destination
 
-        # dist_nearest_abs dùng cho logic hạ cánh
+        # Tìm sân bay phụ tiếp theo (phía trước) và khoảng cách tuyệt đối đến sân bay gần nhất
+        dist_nearest_abs = float('inf')
+        dist_to_next_target = self.distance_to_destination  # Default: hướng về đích
         if self.sub_airports:
             dist_nearest_abs = min(abs(ap - current_pos) for ap in self.sub_airports)
-        else:
-            dist_nearest_abs = float('inf')
+            # Tìm sân bay phụ gần nhất phía trước
+            ahead_airports = [ap for ap in self.sub_airports if ap > current_pos]
+            if ahead_airports:
+                next_ap = min(ahead_airports)
+                dist_to_next_target = next_ap - current_pos
+
+        # ── Dense Approach Reward: Thưởng khi tiếp cận và hạ cánh đúng cách ──
+        # Khi trong vùng tiếp cận (APPROACH_DISTANCE), thưởng DESCEND, phạt CLIMB
+        in_approach_zone = dist_to_next_target <= self.APPROACH_DISTANCE
+        if was_in_air and in_approach_zone:
+            if action == 1:  # DESCEND trong approach zone → thưởng mạnh
+                approach_reward = 0.5 * (1.0 - dist_to_next_target / self.APPROACH_DISTANCE)
+                reward += approach_reward
+            elif action == 2:  # CLIMB khi đang gần sân bay → phạt nhẹ
+                reward -= 0.15
 
         # 6. KIỂM TRA ĐÁP ĐẤT (Chỉ kiểm tra nếu vừa đáp từ trên không xuống)
         if was_in_air and self.twin.altitude <= 0:
@@ -306,8 +323,9 @@ class AircraftEnv(gym.Env):
                 done = True
                 info['event'] = "CRASHED"
 
-        # Kiểm tra timeout (vượt quá MAX_STEPS)
+        # Kiểm tra timeout (vượt quá MAX_STEPS) — phạt nặng để ngăn agent "lười"
         if self.current_step >= self.MAX_STEPS:
+            reward -= 20.0
             truncated = True
             info['event'] = "TIMEOUT"
 
@@ -320,25 +338,36 @@ class AircraftEnv(gym.Env):
     # ================================================================
     def _get_obs(self) -> np.ndarray:
         """
-        Trả về observation vector 10 chiều:
-        [Altitude, Velocity, Fuel, RUL,
-         SignedDist_AP1..5 (sorted, âm=đã qua, dương=phía trước),
-         Dist_Destination]
+        Trả về observation vector 11 chiều:
+        [Altitude, Fuel, RUL,
+         SignedDist_AP1..AP6 (sorted, âm=đã qua, dương=phía trước),
+         Dist_to_Destination,
+         In_Approach_Zone (1.0 nếu đang gần sân bay tiếp theo)]
+
+        Với 6 signed distances, agent có thể thấy TẤT CẢ các sân bay đang ở đâu so với nó,
+        từ đó suy luận về nhiên liệu để quyết định bỏ qua hay dừng bảo trì.
         """
         current_rul = self.twin.current_rul if self.twin.current_rul is not None else 150.0
         current_pos = self.TOTAL_DISTANCE - self.distance_to_destination
 
-        # Signed distances: dương = airport phía trước, âm = đã bay qua
-        # sub_airports đã được sort trong reset()
+        # Signed distances: dương = sân bay phía trước, âm = đã bay qua
         airport_dists = [ap - current_pos for ap in self.sub_airports]
+
+        # Tính dist_to_next_target để xác định approach zone
+        dist_to_next_target = max(0.0, self.distance_to_destination)
+        ahead_airports = [ap for ap in self.sub_airports if ap > current_pos]
+        if ahead_airports:
+            dist_to_next_target = min(ahead_airports) - current_pos
+
+        in_approach_zone = 1.0 if dist_to_next_target <= self.APPROACH_DISTANCE else 0.0
 
         return np.array([
             self.twin.altitude,
-            self.twin.velocity,
             self.twin.fuel,
             current_rul,
-            *airport_dists,                          # 5 giá trị
-            max(0.0, self.distance_to_destination)
+            *airport_dists,                      # 6 giá trị signed
+            max(0.0, self.distance_to_destination),
+            in_approach_zone,
         ], dtype=np.float32)
 
     def _dist_to_nearest_airport(self) -> float:
@@ -372,9 +401,9 @@ class AircraftEnv(gym.Env):
         self.twin.current_rul = None
         self.twin.status = "HEALTHY"
         self.twin.fuel = self.FUEL_CAPACITY
-        self.twin.altitude = 0.0
-        self.twin.velocity = 0.0
-        self.flight_phase = "GROUNDED"
+        self.twin.altitude = 2000.0  # Sau bảo trì, khởi động lại ở độ cao 2000m (giống reset())
+        self.twin.velocity = self.V_CRUISE
+        self.flight_phase = "CRUISING"
 
         # Nạp cycle đầu (engine mới = khỏe mạnh) bằng NumPy slicing
         init_cycles = min(SEQUENCE_LENGTH, len(self.current_engine_data))

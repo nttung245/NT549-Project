@@ -107,7 +107,7 @@ def main(run_name=None):
                     gamma=0.99,
                     gae_lambda=0.95,
                     clip_range=0.2,
-                    ent_coef=0.01,
+                    ent_coef=0.05,
                     tensorboard_log=os.path.join(PROJECT_ROOT, 'logs', 'ppo_aircraft')
                 )
 
@@ -118,7 +118,7 @@ def main(run_name=None):
                 # Add MLflow Callback
                 mlflow_cb = MLflowLoggingCallback(verbose=1)
                 
-                total_timesteps = 500_000
+                total_timesteps = 1_000_000
                 ppo_model.learn(total_timesteps=total_timesteps, callback=mlflow_cb)
 
                 # Save PPO model with run name
