@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
 
 from scripts.data_processor import prepare_data, FEATURES, KEY_SENSORS
 from scripts.aircraft_env import AircraftEnv
+from scripts.digital_twin import AircraftDigitalTwin
 
 # RL Components
 from stable_baselines3 import PPO
@@ -30,7 +31,7 @@ app.add_middleware(
 )
 
 # Global State
-env = None
+env: AircraftEnv | None = None
 simulation_task = None
 is_running = False
 current_state = {}
@@ -60,7 +61,7 @@ async def startup_event():
 
     env = AircraftEnv(
         fleet_data=train_rolling,
-        model=lstm_model,
+        model_path=model_path,
         scaler=scaler,
         sensor_list=KEY_SENSORS,
         features_list=FEATURES
@@ -76,7 +77,10 @@ async def startup_event():
     if os.path.exists(ppo_path + ".zip") and os.path.exists(stats_path):
         try:
             # We need a DummyVecEnv to wrap for VecNormalize
-            def make_dummy_env(): return env
+            def make_dummy_env():
+                if env is None:
+                    raise RuntimeError("Environment has not been initialized.")
+                return env
             dummy_vec_env = DummyVecEnv([make_dummy_env])
             
             # Load normalization stats
@@ -98,6 +102,8 @@ async def startup_event():
 
 def update_current_state(obs, info, reward, step, action_str):
     global current_state
+    if env is None:
+        return
     # obs = [Altitude, Velocity, Fuel, Current_RUL, Dist_AP1, Dist_AP2, Dist_AP3, Dist_AP4, Dist_AP5, Dist_Dest]
     # "dist_next" in UI should show the distance to the closest airport AHEAD.
     airport_dists = obs[4:9]
@@ -133,7 +139,8 @@ async def simulation_loop():
     while True:
         if is_running and env:
             # Use RL Agent if available, else fallback to heuristic
-            obs = env._get_obs() # Get raw observation
+            active_env = env
+            obs = active_env._get_obs() # Get raw observation
             
             if ppo_model and vec_normalize:
                 # 1. Normalize observation
@@ -143,14 +150,17 @@ async def simulation_loop():
                 action = int(action)
             else:
                 # Simple heuristic policy fallback
-                dist_closest = env._dist_to_nearest_airport()
-                current_rul = env.twin.current_rul if env.twin.current_rul else 150
+                dist_closest = active_env._dist_to_nearest_airport()
+                twin = active_env.twin
+                if twin is None:
+                    raise RuntimeError("Environment must be reset before simulation loop runs.")
+                current_rul = twin.current_rul if twin.current_rul else 150
                 action = 0  # Default fly
-                if (current_rul < 30 or env.twin.fuel < 20) and env.flight_phase == "CRUISING":
-                    if dist_closest < env.LANDING_THRESHOLD:
+                if (current_rul < 30 or twin.fuel < 20) and active_env.flight_phase == "CRUISING":
+                    if dist_closest < active_env.LANDING_THRESHOLD:
                         action = 1 # Land
 
-            obs, r, done, t, info = env.step(action)
+            obs, r, done, t, info = active_env.step(action)
             step_count += 1
             
             # Map actions to readable strings
@@ -174,6 +184,8 @@ async def start_sim():
 
 @app.websocket("/ws/simulation")
 async def websocket_endpoint(websocket: WebSocket):
+    global is_running, env
+
     await websocket.accept()
     clients.add(websocket)
     try:
@@ -186,18 +198,20 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = json.loads(data)
             cmd = msg.get("command")
             
-            global is_running, env
             if cmd == "TOGGLE_PLAY":
                 is_running = not is_running
                 
             elif cmd == "RESET":
                 is_running = False
+                if env is None:
+                    continue
                 obs, info = env.reset()
                 update_current_state(obs, info, 0.0, 0, "RESET")
                 await broadcast_state()
                 
             elif cmd in ["FORCE_FLY", "FORCE_CRUISE", "FORCE_LAND", "FORCE_DESCEND", "FORCE_CLIMB"]:
                 if not is_running and env: # Manual step controls
+                    active_env = env
                     # Map websocket commands to environment actions
                     cmd_to_action = {
                         "FORCE_FLY": 0,
@@ -207,7 +221,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         "FORCE_CLIMB": 2
                     }
                     action = cmd_to_action[cmd]
-                    obs, r, done, t, info = env.step(action)
+                    obs, r, done, t, info = active_env.step(action)
                     
                     action_map = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
                     act_str = action_map[action]

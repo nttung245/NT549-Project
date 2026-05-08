@@ -42,8 +42,9 @@ def create_lstm_model(input_shape: tuple) -> Sequential:
 # Sequence Creation
 # ============================================================
 def create_sequences(data: pd.DataFrame, scaler, seq_length: int = SEQUENCE_LENGTH,
-                     all_features: list = None, sensor_only_list: list = None,
-                     is_test: bool = None):
+                     all_features: list[str] | None = None,
+                     sensor_only_list: list[str] | None = None,
+                     is_test: bool | None = None):
     """
     Create sliding window sequences for LSTM.
     Handles 'Final Sequence only' (for test set) and 'All sequences' (for training).

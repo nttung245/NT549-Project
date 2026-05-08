@@ -85,7 +85,7 @@ def add_test_rul(test_df: pd.DataFrame, true_rul_df: pd.DataFrame) -> pd.DataFra
     return df.drop(['max_cycle_test', 'RUL_ground_truth'], axis=1)
 
 
-def add_rolling_features(df: pd.DataFrame, sensors: list = None, window: int = WINDOW_SIZE) -> pd.DataFrame:
+def add_rolling_features(df: pd.DataFrame, sensors: list[str] | None = None, window: int = WINDOW_SIZE) -> pd.DataFrame:
     """Áp dụng Rolling Mean cho các cảm biến để giảm nhiễu."""
     if sensors is None:
         sensors = KEY_SENSORS

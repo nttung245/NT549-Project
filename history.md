@@ -1,5 +1,171 @@
 # Nhật ký Thay đổi Dự án (Project History)
 
+## [2026-05-08] - Ổn định PPO sau Altitude Reward: Chống Local Optimum Rollout Tốt nhưng Eval Xấu
+
+### Bối Cảnh
+Sau khi thêm vật lý/phần thưởng bay cao tốt hơn, MLflow cho thấy một pattern bất thường:
+- `rollout/ep_rew_mean` tăng và có vẻ hội tụ quanh ~300+.
+- `rollout/ep_len_mean` vẫn khá dài (~650-700 steps).
+- Nhưng `eval/mean_reward` giảm mạnh về vùng âm và `eval/mean_ep_length` tụt xuống rất ngắn (~60-80 steps).
+
+Điều này không có nghĩa ý tưởng "bay cao tiết kiệm hơn và đi xa hơn" là sai. Vấn đề nằm ở reward shaping: PPO đang học cách tối ưu dense reward dễ ăn trong rollout thay vì học một deterministic policy hạ cánh ổn định.
+
+### Chẩn Đoán Gốc Rễ
+
+#### 1. Rollout stochastic khác eval deterministic
+Trong training, rollout dùng policy stochastic nên exploration đôi khi giúp agent DESCEND đúng hoặc MAINTAINED được. Nhưng eval trong `demo_flow.ipynb` dùng `deterministic=True`, tức chọn action có xác suất cao nhất. Nếu policy chưa thực sự học timing hạ cánh, deterministic action dễ collapse thành:
+- CRUISE/CLIMB quá lâu để ăn lợi ích bay cao.
+- DESCEND quá sớm hoặc quá muộn.
+- FIELD_CRASH/FUEL_EMPTY/CRASHED sau vài chục step.
+
+#### 2. Dense progress reward cạnh tranh với mục tiêu thật
+Reward tiến lên cũ là `distance_covered / 1000.0`. Khi altitude cao làm CRUISE nhanh hơn và tiết kiệm nhiên liệu hơn, agent nhận dense reward đều đặn chỉ bằng cách bay cao/cruise. Nếu terminal penalty chưa đủ nặng, policy có thể đạt rollout reward khá tốt dù cuối cùng vẫn fail.
+
+#### 3. Approach reward cũ thưởng DESCEND chưa đủ điều kiện
+Logic cũ thưởng DESCEND khi vào approach zone, nhưng không kiểm tra DESCEND đó có khả thi để chạm đất gần sân bay không. Vì vậy agent có thể học "DESCEND để ăn approach reward" thay vì "DESCEND đúng thời điểm để landing".
+
+#### 4. Hyperparameter chưa khớp với khuyến nghị trước đó
+`history.md` đã khuyến nghị dùng LR cố định `3e-4` và `ent_coef=0.05`, nhưng `demo_flow.ipynb` đang dùng linear LR `3e-4 → 3e-5` và `ent_coef=0.03`. Với bài toán timing hạ cánh, LR giảm quá thấp dễ làm policy đóng băng ở local optimum, còn entropy thấp khiến exploration không đủ lâu.
+
+### Thay Đổi Trong `scripts/aircraft_env.py`
+
+#### 1. Giảm dominance của dense progress reward
+- Đổi progress reward từ:
+  ```python
+  distance_covered / 1000.0
+  ```
+  thành:
+  ```python
+  distance_covered / 1500.0
+  ```
+- Mục tiêu: dense reward vẫn hướng agent đi về phía trước, nhưng không còn đủ mạnh để lấn át reward hạ cánh/thành công.
+
+#### 2. Thêm altitude efficiency reward nhỏ và có kiểm soát
+- Thêm bonus nhỏ khi CRUISE ở altitude cao:
+  ```python
+  altitude_efficiency_reward = 0.003 * altitude_ratio if action_int == 0 else 0.0
+  ```
+- Mục tiêu: vẫn giữ lợi ích vật lý của bay cao, nhưng không để nó trở thành mục tiêu chính thay cho ARRIVED/MAINTAINED.
+
+#### 3. Approach reward chỉ thưởng khi descent khả thi
+- Tính thêm:
+  ```python
+  descent_steps_remaining = ceil(altitude / DESCEND_RATE)
+  descent_distance_needed = descent_steps_remaining * V_DESCEND
+  landing_feasible_now = dist_to_next_target <= descent_distance_needed + LANDING_THRESHOLD
+  ```
+- DESCEND chỉ được thưởng approach reward nếu `landing_feasible_now=True`.
+- DESCEND quá sớm/không khả thi bị penalty nhẹ `-0.08`.
+- CLIMB trong approach zone bị penalty nhẹ `-0.05`.
+
+#### 4. Tăng trọng số mục tiêu thật và lỗi thật
+- ARRIVED: `+100 → +150`.
+- FIELD_CRASH/FUEL_EMPTY/CRASHED: `-40 → -60`.
+- TIMEOUT: `-20 → -30`.
+- Maintenance reward có thêm `landing_accuracy_bonus` để thưởng đáp gần sân bay hơn.
+
+#### 5. Thêm diagnostic info vào mỗi step
+`info` giờ có thêm các field để debug vì sao eval fail:
+- `reward_components`
+- `action`
+- `altitude`
+- `fuel`
+- `rul`
+- `current_pos`
+- `distance_to_destination`
+- `dist_to_next_target`
+- `dist_nearest_airport`
+- `in_approach_zone`
+- `landing_feasible_now`
+- `descent_steps_remaining`
+- `descent_distance_needed`
+- `flight_phase`
+
+### Thay Đổi Trong `scripts/rl_callbacks.py`
+
+#### 1. Thêm `EvalDiagnosticsCallback`
+Callback mới chạy các eval probe riêng để giải thích vì sao eval xấu, thay vì chỉ nhìn `eval/mean_reward`.
+
+Các metric được log vào SB3 logger/MLflow:
+- `eval_diag_det/mean_reward`
+- `eval_diag_det/mean_length`
+- `eval_diag_det/mean_final_altitude`
+- `eval_diag_det/mean_first_descend_distance`
+- `eval_diag_det/landing_feasible_ratio`
+- `eval_diag_det/action_cruise_ratio`
+- `eval_diag_det/action_descend_ratio`
+- `eval_diag_det/action_climb_ratio`
+- `eval_diag_det/event_FIELD_CRASH`, `event_FUEL_EMPTY`, `event_CRASHED`, `event_TIMEOUT`, `event_ARRIVED`, `event_MAINTAINED`
+
+Có thêm bản stochastic (`eval_diag_stoch/...`) để so sánh với deterministic. Nếu stochastic tốt nhưng deterministic xấu, nguyên nhân chính là policy distribution chưa hội tụ thành action rõ ràng.
+
+#### 2. Sửa nhỏ VecNormalize handling
+- Lưu `vec_normalize_env` vào biến local trước khi `.save()` để tránh nullable/static type issue.
+- Sync `obs_rms` từ train env sang eval env trong diagnostic callback trước khi probe.
+
+### Thay Đổi Trong `demo_flow.ipynb`
+
+#### 1. Sửa hyperparameter PPO
+- Đổi từ linear LR schedule:
+  ```python
+  get_linear_fn(3e-4, 3e-5, 1.0)
+  ```
+  sang fixed:
+  ```python
+  learning_rate = 3e-4
+  ```
+- Tăng `ent_coef`: `0.03 → 0.05`.
+
+#### 2. Tăng độ tin cậy eval
+- Thêm `n_eval_episodes=10` cho `EvalCallback`.
+- Trước đó eval mặc định ít episode hơn, dễ bị nhiễu bởi random airport noise.
+
+#### 3. Thêm diagnostics callback
+- Deterministic diagnostics mỗi `10000` steps:
+  ```python
+  EvalDiagnosticsCallback(..., deterministic=True, log_prefix="eval_diag_det")
+  ```
+- Stochastic diagnostics mỗi `20000` steps:
+  ```python
+  EvalDiagnosticsCallback(..., deterministic=False, log_prefix="eval_diag_stoch")
+  ```
+
+### Cách Đọc Kết Quả MLflow Sau Sửa
+- Nếu `eval_diag_det/action_cruise_ratio` rất cao và event chủ yếu là `FUEL_EMPTY`: deterministic policy đang cruise quá lâu.
+- Nếu `eval_diag_det/action_descend_ratio` cao nhưng event là `FIELD_CRASH`: policy đang descend sai timing hoặc không gần airport.
+- Nếu `mean_first_descend_distance` quá lớn: descend quá sớm.
+- Nếu `mean_first_descend_distance` quá nhỏ hoặc âm: descend quá muộn/đã qua airport.
+- Nếu `eval_diag_stoch` tốt hơn nhiều so với `eval_diag_det`: policy còn phụ thuộc exploration, cần train lâu hơn hoặc giữ entropy cao hơn.
+- Nếu cả deterministic và stochastic đều xấu: reward/physics vẫn cần chỉnh tiếp hoặc observation chưa đủ thông tin.
+
+### Validation
+Đã kiểm tra:
+```bash
+python3 -m compileall -q scripts server.py main.py
+```
+Và validate JSON của `demo_flow.ipynb` thành công.
+
+## [2026-05-02] - Tối ưu Vật lý bay theo Độ cao (Altitude-Dependent Physics) & Hạ cánh Chuẩn xác
+
+### Bối Cảnh
+Agent học được cách bay cơ bản, nhưng không bao giờ bay lên độ cao tối đa (12000m) vì bị phạt tốc độ và xăng. Đồng thời, `APPROACH_DISTANCE` quá rộng (1500m) kết hợp `LANDING_THRESHOLD` hẹp khiến Agent dễ dàng bị FIELD_CRASH trong lúc đánh giá (eval) khi áp dụng deterministic policy.
+
+### Thay Đổi Trong `scripts/aircraft_env.py`
+
+#### 1. Đưa Vật lý thực tế vào Game (Tạo incentive leo cao)
+Thay vì các hằng số cố định, tốc độ và tiêu thụ nhiên liệu giờ thay đổi tuyến tính theo độ cao (càng cao, không khí càng loãng, bay càng nhanh và ít tốn xăng):
+*   `V_CRUISE`: Tính từ 25 m/step (ở 0m) lên tới **40 m/step** (ở 12000m).
+*   `FUEL_RATE`: Tính từ 0.5 xăng/step (ở 0m) giảm còn **0.3 xăng/step** (ở 12000m).
+*   **Kết quả:** Agent sẽ tự động học được chiến lược CLIMB lên độ cao tối đa ngay từ đầu chặng để tận dụng quãng đường và xăng, giúp nó vượt qua nhiều sân bay hơn.
+
+#### 2. Tinh chỉnh Cửa sổ Hạ cánh (Landing Window)
+Để hạ cánh từ 12000m xuống, máy bay mất 24 steps, lướt ngang một đoạn 360m. Do đó:
+*   `LANDING_THRESHOLD`: Chỉnh từ 500m thành **400m** (Đủ không gian để chứa sai số hạ cánh từ 12000m).
+*   `APPROACH_DISTANCE`: Chỉnh từ 1500m thành **800m** (Sửa lỗi "Bẫy 1500m" khiến máy bay đâm xuống đất quá sớm).
+
+#### 3. Bỏ hình phạt khi Skip sân bay
+Loại bỏ hoàn toàn hình phạt `-0.15` cho các hành động `CLIMB` hay `CRUISE` bên trong Approach Zone. Agent được toàn quyền quyết định bỏ qua sân bay dựa vào lượng Fuel và RUL còn lại thay vì bị ép phải đáp mọi lúc mọi nơi.
+
 ## [2026-05-02] - Fix Agent Không Học Được Cách Hạ Cánh (Dense Approach Reward + Simplified Startup)
 
 ### Bối Cảnh
