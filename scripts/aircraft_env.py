@@ -46,11 +46,11 @@ class AircraftEnv(gym.Env):
     V_DESCEND = 15.0          # Tốc độ ngang khi rà xuống (m/cycle)
     V_CLIMB = 20.0            # Tốc độ ngang khi leo cao (m/cycle)
     
-    DESCEND_RATE = 500.0      # Tốc độ giảm độ cao (m/cycle) — giảm từ 1000 để hạ cánh từ từ hơn
-    CLIMB_RATE = 1000.0       # Tốc độ tăng độ cao (m/cycle)
-    MAX_ALTITUDE = 12000.0    # Độ cao tối đa cho phép
+    DESCEND_RATE = 500.0      # Tốc độ giảm độ cao (m/cycle)
+    CLIMB_RATE = 500.0        # Giảm từ 1000 để agent không nhảy altitude quá cao
+    MAX_ALTITUDE = 5000.0     # Curriculum dễ hơn: tránh agent leo quá cao và khó hạ cánh
     
-    LANDING_THRESHOLD = 400.0 # Đủ rộng cho quãng đường lướt 360m khi hạ từ 12000m
+    LANDING_THRESHOLD = 400.0 # Đủ rộng cho quãng đường lướt ~150m khi hạ từ 5000m
     APPROACH_DISTANCE = 800.0 # Vùng nhận approach reward tương ứng với cửa sổ hạ cánh
     MAX_STEPS = 2000          # Tăng từ 1000 → 2000 (vì DESCEND_RATE giảm cần nhiều step hơn)
     FUEL_RATE = 0.5           # Nhiên liệu tiêu hao cơ bản mỗi cycle
@@ -60,14 +60,22 @@ class AircraftEnv(gym.Env):
 
     def __init__(self, fleet_data: pd.DataFrame, model_path: str, scaler,
                  sensor_list: list[str] | None = None,
-                 features_list: list[str] | None = None):
+                 features_list: list[str] | None = None,
+                 eligible_units: list[int] | None = None,
+                 min_initial_rul: float = 120.0,
+                 maintenance_resets_health: bool = True):
         """
         Args:
-            fleet_data: DataFrame huấn luyện (đã rolling + có cột RUL).
+            fleet_data: DataFrame huấn luyện/đánh giá (đã rolling + có cột RUL).
             model_path: Path to trained Keras LSTM/GRU model file.
             scaler: Fitted StandardScaler.
             sensor_list: List sensor columns cho LSTM.
             features_list: List tất cả feature columns cho scaler.
+            eligible_units: Optional explicit engine IDs to sample from.
+            min_initial_rul: Minimum RUL at the initial LSTM window. Units below
+                this threshold are excluded to avoid impossible starting episodes.
+            maintenance_resets_health: If True, a successful intermediate
+                maintenance landing refuels and swaps/resets the engine health.
         """
         super(AircraftEnv, self).__init__()
 
@@ -130,21 +138,42 @@ class AircraftEnv(gym.Env):
 
         # ── Internal state ──────────────────────────────────────
         self.twin = None
-        # Chỉ lấy động cơ số 1 để huấn luyện giai đoạn đầu (đảm bảo đủ RUL để hoàn thành lộ trình)
-        self.engine_units = [1]
+        self.min_initial_rul = float(min_initial_rul)
+        self.maintenance_resets_health = bool(maintenance_resets_health)
+        self.unit_rul_map: dict[int, np.ndarray] = {}
+        self.unit_initial_rul_map: dict[int, float] = {}
+        self.unit_data_map: dict[int, np.ndarray] = {}
         
         # Tối ưu hóa: Chuyển DataFrame sang Dictionary của NumPy arrays để lookup O(1)
-        self.unit_data_map = {
-            unit_id: group.sort_values('time_cycles')[self.features_list].values.astype(np.float32)
-            for unit_id, group in fleet_data.groupby('unit_nr')
-        }
+        for raw_unit_id, group in fleet_data.groupby('unit_nr'):
+            unit_id = int(cast(Any, raw_unit_id))
+            sorted_group = group.sort_values('time_cycles')
+            self.unit_data_map[unit_id] = np.asarray(
+                sorted_group[self.features_list].values,
+                dtype=np.float32,
+            )
+            if 'RUL' in sorted_group.columns:
+                self.unit_rul_map[unit_id] = np.asarray(
+                    sorted_group['RUL'].values,
+                    dtype=np.float32,
+                )
 
+        all_units = sorted(self.unit_data_map.keys())
+        candidate_units = [int(unit_id) for unit_id in eligible_units] if eligible_units is not None else all_units
+        self.engine_units = self._filter_engine_units(candidate_units)
+        if not self.engine_units:
+            raise ValueError(
+                f"No eligible engine units after filtering with min_initial_rul={self.min_initial_rul}. "
+                "Lower min_initial_rul or pass explicit eligible_units."
+            )
+      
         self.current_unit_idx = 0
         self.current_cycle_idx = 0
         self.current_engine_data = None
         self.distance_to_destination = self.TOTAL_DISTANCE
         self.sub_airports = []    # Vị trí các sân bay phụ (distance from origin)
         self.flight_phase = "CRUISING"  # Trạng thái bay: "CRUISING" hoặc "DESCENDING"
+        self.pending_reset = False  # Flag để defer reset sau khi landing
 
     # ================================================================
     # Reset
@@ -152,28 +181,10 @@ class AircraftEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        # Chọn ngẫu nhiên một engine unit từ dataset (Sử dụng lookup O(1))
-        unit_id = self.np_random.choice(self.engine_units)
-        current_engine_data = self.unit_data_map[unit_id]
-        self.current_engine_data = current_engine_data
-
-        # Tạo Digital Twin
-        twin = AircraftDigitalTwin(
-            engine_id=unit_id, model=self.model, scaler=self.scaler,
-            seq_length=SEQUENCE_LENGTH, features_list=self.features_list,
-            sensor_list=self.sensor_list, fuel_capacity=self.FUEL_CAPACITY,
-            predict_fn=self._fast_predict_fn
-        )
+        # Chọn ngẫu nhiên một engine unit đủ RUL từ dataset (Sử dụng lookup O(1))
+        unit_id = self.engine_units[int(self.np_random.integers(len(self.engine_units)))]
+        twin = self._build_twin_for_unit(unit_id)
         self.twin = twin
-
-        # Nạp các cycle đầu vào buffer trong twin (Sử dụng NumPy slicing - Cực nhanh)
-        init_cycles = min(SEQUENCE_LENGTH, len(current_engine_data))
-        if init_cycles > 0:
-            # Gán trực tiếp mảng dữ liệu thay vì chạy vòng lặp
-            twin.buffer[-init_cycles:] = current_engine_data[:init_cycles]
-            twin.buffer_filled = init_cycles
-        
-        self.current_cycle_idx = init_cycles
 
         # Khởi tạo hành trình
         self.distance_to_destination = self.TOTAL_DISTANCE
@@ -207,12 +218,12 @@ class AircraftEnv(gym.Env):
         done = False
         truncated = False
         reward = 0.0
-        reward_components: dict[str, float] = {}
+        reward_components = {}
         info: dict[str, Any] = {"action": action_int}
-
+   
         if self.twin is None:
             raise RuntimeError("Environment must be reset before calling step().")
-
+   
         twin = self.twin
 
         # 1. Cập nhật dữ liệu cảm biến từ NASA Dataset (tăng 1 cycle)
@@ -227,6 +238,7 @@ class AircraftEnv(gym.Env):
 
         # Kiểm tra xem máy bay có đang ở trên không không
         was_in_air = twin.altitude > 0
+        is_grounded = not was_in_air
 
         # Tính toán hiệu suất bay dựa trên độ cao hiện tại
         # Càng cao bay càng nhanh và càng tiết kiệm nhiên liệu
@@ -235,7 +247,18 @@ class AircraftEnv(gym.Env):
         current_fuel_rate = 0.5 - altitude_ratio * 0.2   # 0.5 -> 0.3
 
         # 3. Xử lý Hành động
-        if action_int == 0:
+        if is_grounded and action_int in (0, 1):
+            # Sau khi bảo trì/hạ cánh, CRUISE/DESCEND trên mặt đất là hành động không hợp lệ.
+            # Không cho máy bay trượt dọc đường băng vô hạn; chỉ CLIMB mới tiếp tục hành trình.
+            self.flight_phase = "GROUNDED"
+            self.twin.velocity = 0.0
+            distance_covered = 0.0
+            fuel_spent = 0.0
+            invalid_ground_action_penalty = -0.25 if action_int == 1 else -0.10
+            reward += invalid_ground_action_penalty
+            reward_components["invalid_ground_action"] = invalid_ground_action_penalty
+
+        elif action_int == 0:
         # ── CRUISE: Giữ độ cao, Tốc độ tỷ lệ với độ cao ──
             self.flight_phase = "CRUISING"
             self.twin.velocity = current_v_cruise
@@ -262,9 +285,10 @@ class AircraftEnv(gym.Env):
             raise ValueError(f"Invalid action: {action_int}")
 
         # Base step reward khuyến khích tiến lên (Reward Shaping).
-        # Keep this dense term deliberately small so it cannot dominate successful landings.
+        # Không còn thưởng cruise theo altitude: reward này từng khuyến khích agent
+        # leo cao quá mức, làm timing DESCEND khó học dù threshold sân bay khá rộng.
         progress_reward = distance_covered / 1500.0
-        altitude_efficiency_reward = 0.003 * altitude_ratio if action_int == 0 else 0.0
+        altitude_efficiency_reward = 0.0
         time_penalty = -0.01
         reward += progress_reward + altitude_efficiency_reward + time_penalty
         reward_components["progress"] = progress_reward
@@ -303,7 +327,8 @@ class AircraftEnv(gym.Env):
         if was_in_air and in_approach_zone:
             if action_int == 1 and landing_feasible_now:
                 # Reward only feasible descent timing, not blind descent inside the zone.
-                approach_reward = 0.35 * (1.0 - dist_to_next_target / self.APPROACH_DISTANCE)
+                # Tăng reward để tín hiệu "DESCEND đúng thời điểm" thắng incentive cruise/progress.
+                approach_reward = 0.75 * (1.0 - dist_to_next_target / self.APPROACH_DISTANCE)
                 reward += approach_reward
                 reward_components["approach"] = approach_reward
             elif action_int == 1 and not landing_feasible_now:
@@ -341,15 +366,34 @@ class AircraftEnv(gym.Env):
                     maintenance_reward = progress_bonus + rul_bonus + fuel_bonus + landing_accuracy_bonus  # Luôn >= 0
                     reward += maintenance_reward
                     reward_components["maintenance"] = maintenance_reward
-
-                    self.dist_since_last_maintenance = 0.0  # Reset khoảng cách sau mỗi lần bảo trì
-                    self._reset_to_new_engine()
+            
                     # Snap vị trí về sân bay phụ đã hạ cánh
                     landed_ap = min(self.sub_airports, key=lambda p: abs(p - current_pos))
                     self.distance_to_destination = self.TOTAL_DISTANCE - landed_ap
-
+            
                     info['event'] = "MAINTAINED"
                     info['rul_at_landing'] = current_rul
+            
+                    # Intermediate maintenance is a checkpoint: do not terminate.
+                    # Refuel and, by default, swap/reset to a healthy engine so RUL
+                    # becomes sufficient for the next route segment.
+                    if self.maintenance_resets_health:
+                        replacement_unit = self.engine_units[int(self.np_random.integers(len(self.engine_units)))]
+                        twin = self._build_twin_for_unit(replacement_unit)
+                        twin.altitude = 0.0
+                        twin.velocity = 0.0
+                        self.twin = twin
+                        info['maintenance_replacement_unit'] = replacement_unit
+                        current_rul = float(twin.current_rul if twin.current_rul is not None else 150.0)
+                    else:
+                        twin.altitude = 0.0
+                        twin.velocity = 0.0
+                        twin.fuel = self.FUEL_CAPACITY
+                    self.flight_phase = "GROUNDED"
+                    done = False
+                    
+                    # Reset maintenance distance counter
+                    self.dist_since_last_maintenance = 0.0
             else:
                 # Rớt máy bay (Hạ cánh giữa đường)
                 field_crash_penalty = -60.0
@@ -359,7 +403,8 @@ class AircraftEnv(gym.Env):
                 info['event'] = "FIELD_CRASH"
 
         # 7. KIỂM TRA TỬ VONG (Hết Nhiên Liệu hoặc RUL = 0)
-        # Chỉ kiểm tra nếu chưa hoàn thành (ví dụ đã hạ cánh thành công)
+        # Chỉ kiểm tra nếu chưa hoàn thành (ví dụ đã hạ cánh thành công).
+        # RUL chỉ làm crash khi máy bay đang bay; sau MAINTAINED máy bay có thể chờ CLIMB ở sân bay.
         if not done:
             if self.twin.fuel <= 0:
                 fuel_empty_penalty = -60.0
@@ -368,7 +413,7 @@ class AircraftEnv(gym.Env):
                 done = True
                 info['event'] = "FUEL_EMPTY"
 
-            elif current_rul <= 0:
+            elif current_rul <= 0 and self.flight_phase != "GROUNDED":
                 crashed_penalty = -60.0
                 reward += crashed_penalty
                 reward_components["crashed"] = crashed_penalty
@@ -463,10 +508,57 @@ class AircraftEnv(gym.Env):
             return row
         return None  # Hết dữ liệu cho engine hiện tại
 
+    def _filter_engine_units(self, candidate_units: list[int]) -> list[int]:
+        """Return units whose initial window has enough true RUL for a fair start."""
+        eligible: list[int] = []
+        for unit_id in candidate_units:
+            if unit_id not in self.unit_data_map:
+                continue
+            rul_values = self.unit_rul_map.get(unit_id)
+            if rul_values is None or len(rul_values) == 0:
+                eligible.append(unit_id)
+                self.unit_initial_rul_map[unit_id] = float('nan')
+                continue
+            init_idx = min(SEQUENCE_LENGTH, len(rul_values)) - 1
+            initial_rul = float(rul_values[max(init_idx, 0)])
+            self.unit_initial_rul_map[unit_id] = initial_rul
+            if initial_rul >= self.min_initial_rul:
+                eligible.append(unit_id)
+        return eligible
+
+    def _build_twin_for_unit(self, unit_id: int) -> AircraftDigitalTwin:
+        """Create/reset the digital twin and preload the initial healthy window."""
+        current_engine_data = self.unit_data_map[unit_id]
+        self.current_engine_data = current_engine_data
+
+        twin = AircraftDigitalTwin(
+            engine_id=unit_id, model=self.model, scaler=self.scaler,
+            seq_length=SEQUENCE_LENGTH, features_list=self.features_list,
+            sensor_list=self.sensor_list, fuel_capacity=self.FUEL_CAPACITY,
+            predict_fn=self._fast_predict_fn
+        )
+
+        init_cycles = min(SEQUENCE_LENGTH, len(current_engine_data))
+        if init_cycles > 0:
+            twin.buffer[-init_cycles:] = current_engine_data[:init_cycles]
+            twin.buffer_filled = init_cycles
+        self.current_cycle_idx = init_cycles
+        twin.current_rul = self.unit_initial_rul_map.get(unit_id)
+        twin.status = "HEALTHY"
+        twin.fuel = self.FUEL_CAPACITY
+        twin.altitude = 2000.0
+        twin.velocity = self.V_CRUISE
+        return twin
+
     def _reset_to_new_engine(self):
         """
         Giả lập bảo trì: chọn engine mới từ dataset (Lookup O(1)),
         nạp lại các cycle đầu vào buffer bằng NumPy slicing.
+
+        Lưu ý: helper này không được gọi cho hạ cánh bảo trì trung gian trong
+        step(), vì reset engine ở đó sẽ làm RUL nhảy lại như episode mới và
+        phá tính liên tục của hành trình. Nó được giữ lại cho các thử nghiệm
+        muốn mô phỏng thay động cơ riêng biệt.
         """
         if self.twin is None:
             raise RuntimeError("Environment must be reset before resetting to a new engine.")
@@ -474,24 +566,14 @@ class AircraftEnv(gym.Env):
         twin = self.twin
 
         # Chọn engine mới từ dataset
-        unit_id = self.np_random.choice(self.engine_units)
-        current_engine_data = self.unit_data_map[unit_id]
-        self.current_engine_data = current_engine_data
-
-        # Reset twin buffer
-        twin.buffer.fill(0)
-        twin.buffer_filled = 0
-        twin.engine_id = unit_id
-        twin.current_rul = None
-        twin.status = "HEALTHY"
-        twin.fuel = self.FUEL_CAPACITY
-        twin.altitude = 2000.0  # Sau bảo trì, khởi động lại ở độ cao 2000m (giống reset())
-        twin.velocity = self.V_CRUISE
+        unit_id = self.engine_units[int(self.np_random.integers(len(self.engine_units)))]
+        new_twin = self._build_twin_for_unit(unit_id)
+        twin.buffer = new_twin.buffer
+        twin.buffer_filled = new_twin.buffer_filled
+        twin.engine_id = new_twin.engine_id
+        twin.current_rul = new_twin.current_rul
+        twin.status = new_twin.status
+        twin.fuel = new_twin.fuel
+        twin.altitude = new_twin.altitude
+        twin.velocity = new_twin.velocity
         self.flight_phase = "CRUISING"
-
-        # Nạp cycle đầu (engine mới = khỏe mạnh) bằng NumPy slicing
-        init_cycles = min(SEQUENCE_LENGTH, len(current_engine_data))
-        if init_cycles > 0:
-            twin.buffer[-init_cycles:] = current_engine_data[:init_cycles]
-            twin.buffer_filled = init_cycles
-        self.current_cycle_idx = init_cycles

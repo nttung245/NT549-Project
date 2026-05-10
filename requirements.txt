@@ -9,3 +9,5 @@ matplotlib
 seaborn
 ipykernel
 tensorboard
+pygame
+mlflow>=3.12.0

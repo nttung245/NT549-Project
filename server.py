@@ -145,8 +145,9 @@ async def simulation_loop():
             if ppo_model and vec_normalize:
                 # 1. Normalize observation
                 norm_obs = vec_normalize.normalize_obs(obs)
-                # 2. Predict action
-                action, _ = ppo_model.predict(norm_obs, deterministic=True)
+                # 2. Predict action with the stochastic policy used during PPO training.
+                # Deterministic argmax can collapse to the single highest-probability action.
+                action, _ = ppo_model.predict(norm_obs, deterministic=False)
                 action = int(action)
             else:
                 # Simple heuristic policy fallback
