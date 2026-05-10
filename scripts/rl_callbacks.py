@@ -64,7 +64,7 @@ class MLflowLoggingCallback(BaseCallback):
 
 class EvalDiagnosticsCallback(BaseCallback):
     """
-    Run short deterministic and optional stochastic evaluation probes and log
+    Run short evaluation probes and log
     event/action/altitude summaries to SB3 and MLflow. This is intentionally
     separate from EvalCallback: EvalCallback keeps model selection stable, while
     this callback explains why evaluation succeeds or collapses.
@@ -75,7 +75,7 @@ class EvalDiagnosticsCallback(BaseCallback):
         eval_env,
         eval_freq: int = 10000,
         n_eval_episodes: int = 5,
-        deterministic: bool = True,
+        deterministic: bool = False,
         log_prefix: str = "eval_diag",
         verbose: int = 0,
     ):
