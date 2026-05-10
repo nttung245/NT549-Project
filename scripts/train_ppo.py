@@ -38,7 +38,9 @@ from scripts.data_processor import FEATURES, KEY_SENSORS, prepare_data
 from scripts.lstm_model import create_sequences, train_model
 from scripts.aircraft_env import AircraftEnv
 from scripts.rl_callbacks import (
+    EntCoefScheduleCallback,
     EvalDiagnosticsCallback,
+    FixedSeedEvalCallback,
     MLflowLoggingCallback,
     SaveVecNormalizeCallback,
     SyncVecNormalizeCallback,
@@ -46,7 +48,7 @@ from scripts.rl_callbacks import (
 
 try:
     from stable_baselines3 import PPO
-    from stable_baselines3.common.callbacks import CallbackList, EvalCallback
+    from stable_baselines3.common.callbacks import CallbackList
     from stable_baselines3.common.env_checker import check_env
     from stable_baselines3.common.env_util import make_vec_env
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
@@ -74,6 +76,57 @@ def ensure_lstm_model(model_path: Path, train_rolling, scaler) -> None:
     model_path.parent.mkdir(parents=True, exist_ok=True)
     lstm_model.save(model_path)
     print(f"💾 LSTM model saved to: {model_path}")
+
+
+def parse_linear_schedule(spec: str | None) -> Callable[[float], float] | None:
+    """
+    Parse a compact linear schedule spec.
+
+    Format: "linear:start:end".
+    The returned callable uses elapsed progress in [0, 1].
+    """
+    if spec is None or spec.strip().lower() in {"", "none", "off", "fixed"}:
+        return None
+
+    parts = spec.split(":")
+    if len(parts) != 3 or parts[0].lower() != "linear":
+        raise ValueError(f"Unsupported schedule spec: {spec!r}. Expected 'linear:start:end'.")
+
+    start = float(parts[1])
+    end = float(parts[2])
+
+    def _schedule(progress_elapsed: float) -> float:
+        progress = min(1.0, max(0.0, float(progress_elapsed)))
+        return start + progress * (end - start)
+
+    return _schedule
+
+
+def make_sb3_learning_rate(
+    *,
+    fixed_value: float,
+    schedule_spec: str | None,
+) -> float | Callable[[float], float]:
+    """
+    Return either a fixed learning rate or an SB3-compatible schedule.
+
+    Stable-Baselines3 passes progress_remaining in [1, 0], so convert it to
+    elapsed progress before applying the user-facing schedule.
+    """
+    elapsed_schedule = parse_linear_schedule(schedule_spec)
+    if elapsed_schedule is None:
+        return fixed_value
+
+    def _sb3_schedule(progress_remaining: float) -> float:
+        progress_elapsed = 1.0 - float(progress_remaining)
+        return elapsed_schedule(progress_elapsed)
+
+    return _sb3_schedule
+
+
+def schedule_start_value(schedule_spec: str | None, fallback: float) -> float:
+    schedule = parse_linear_schedule(schedule_spec)
+    return float(schedule(0.0)) if schedule is not None else float(fallback)
 
 
 def make_aircraft_env_factory(
@@ -183,19 +236,25 @@ def load_or_train_ppo(args: argparse.Namespace):
         # Default to CPU because this project also loads TensorFlow in each env
         # worker; forcing CPU avoids noisy CUDA probing on machines without a
         # properly configured GPU stack.
+        learning_rate = make_sb3_learning_rate(
+            fixed_value=args.learning_rate,
+            schedule_spec=args.learning_rate_schedule,
+        )
+        initial_ent_coef = schedule_start_value(args.ent_coef_schedule, args.ent_coef)
+
         ppo_model = PPO(
             "MlpPolicy",
             train_env,
             verbose=args.verbose,
             device=args.device,
-            learning_rate=args.learning_rate,
+            learning_rate=learning_rate,
             n_steps=args.n_steps,
             batch_size=args.batch_size,
             n_epochs=args.n_epochs,
             gamma=args.gamma,
             gae_lambda=args.gae_lambda,
             clip_range=args.clip_range,
-            ent_coef=args.ent_coef,
+            ent_coef=initial_ent_coef,
             tensorboard_log=str(logs_dir / "ppo_aircraft"),
         )
 
@@ -208,6 +267,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             "tf_cpp_min_log_level": os.environ.get("TF_CPP_MIN_LOG_LEVEL"),
             "tf_enable_onednn_opts": os.environ.get("TF_ENABLE_ONEDNN_OPTS"),
             "learning_rate": args.learning_rate,
+            "learning_rate_schedule": args.learning_rate_schedule,
             "n_envs": args.n_envs,
             "n_steps": args.n_steps,
             "batch_size": args.batch_size,
@@ -216,6 +276,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             "gae_lambda": args.gae_lambda,
             "clip_range": args.clip_range,
             "ent_coef": args.ent_coef,
+            "ent_coef_schedule": args.ent_coef_schedule,
             "clip_obs": args.clip_obs,
             "norm_obs": True,
             "norm_reward_train": True,
@@ -226,6 +287,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             "diag_det_freq": args.diag_det_freq,
             "diag_stoch_freq": args.diag_stoch_freq,
             "diag_n_episodes": args.diag_n_episodes,
+            "eval_seed": args.eval_seed,
             "min_initial_rul": args.min_initial_rul,
             "maintenance_resets_health": args.maintenance_resets_health,
             "eligible_units": args.eligible_units,
@@ -239,7 +301,7 @@ def load_or_train_ppo(args: argparse.Namespace):
         # 5. Set up callback chain.
         sync_cb = SyncVecNormalizeCallback(eval_env=eval_env, verbose=1)
         save_vec_stats_cb = SaveVecNormalizeCallback(save_path=str(best_model_dir), verbose=1)
-        eval_callback = EvalCallback(
+        eval_callback = FixedSeedEvalCallback(
             eval_env,
             best_model_save_path=str(best_model_dir),
             log_path=str(logs_dir / "eval_results"),
@@ -247,6 +309,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             n_eval_episodes=args.eval_n_episodes,
             deterministic=True,
             callback_on_new_best=save_vec_stats_cb,
+            eval_seed=args.eval_seed,
         )
         eval_diag_det_cb = EvalDiagnosticsCallback(
             eval_env=eval_env,
@@ -254,6 +317,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             n_eval_episodes=args.diag_n_episodes,
             deterministic=True,
             log_prefix="eval_diag_det",
+            eval_seed=args.eval_seed,
             verbose=1,
         )
         eval_diag_stoch_cb = EvalDiagnosticsCallback(
@@ -262,17 +326,31 @@ def load_or_train_ppo(args: argparse.Namespace):
             n_eval_episodes=args.diag_n_episodes,
             deterministic=False,
             log_prefix="eval_diag_stoch",
+            eval_seed=args.eval_seed,
             verbose=1,
+        )
+        ent_coef_schedule = parse_linear_schedule(args.ent_coef_schedule)
+        ent_coef_schedule_cb = (
+            EntCoefScheduleCallback(
+                schedule=ent_coef_schedule,
+                total_timesteps=args.total_timesteps,
+                verbose=1,
+            )
+            if ent_coef_schedule is not None
+            else None
         )
         mlflow_cb = MLflowLoggingCallback(verbose=1)
 
-        callback_list = CallbackList([
+        callbacks = [
             sync_cb,
             eval_callback,
             eval_diag_det_cb,
             eval_diag_stoch_cb,
-            mlflow_cb,
-        ])
+        ]
+        if ent_coef_schedule_cb is not None:
+            callbacks.append(ent_coef_schedule_cb)
+        callbacks.append(mlflow_cb)
+        callback_list = CallbackList(callbacks)
 
         # 6. Start training.
         ppo_model.learn(total_timesteps=args.total_timesteps, callback=callback_list)
@@ -306,6 +384,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--learning-rate-schedule",
+        type=str,
+        default="linear:3e-4:3e-5",
+        help="Learning-rate schedule spec, e.g. 'linear:3e-4:3e-5'. Use 'none' for fixed --learning-rate.",
+    )
     parser.add_argument("--n-steps", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--n-epochs", type=int, default=10)
@@ -313,6 +397,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
     parser.add_argument("--ent-coef", type=float, default=0.05)
+    parser.add_argument(
+        "--ent-coef-schedule",
+        type=str,
+        default="linear:0.05:0.005",
+        help="Entropy coefficient schedule spec, e.g. 'linear:0.05:0.005'. Use 'none' for fixed --ent-coef.",
+    )
     parser.add_argument("--clip-obs", type=float, default=10.0)
     parser.add_argument("--verbose", type=int, default=1)
     parser.add_argument(
@@ -323,11 +413,17 @@ def parse_args() -> argparse.Namespace:
         help="Torch device for PPO. Default CPU avoids CUDA warnings on machines without GPU drivers.",
     )
 
-    parser.add_argument("--eval-freq", type=int, default=5000)
-    parser.add_argument("--eval-n-episodes", type=int, default=10)
-    parser.add_argument("--diag-det-freq", type=int, default=10000)
-    parser.add_argument("--diag-stoch-freq", type=int, default=20000)
-    parser.add_argument("--diag-n-episodes", type=int, default=10)
+    parser.add_argument("--eval-freq", type=int, default=20000)
+    parser.add_argument("--eval-n-episodes", type=int, default=50)
+    parser.add_argument("--diag-det-freq", type=int, default=20000)
+    parser.add_argument("--diag-stoch-freq", type=int, default=40000)
+    parser.add_argument("--diag-n-episodes", type=int, default=30)
+    parser.add_argument(
+        "--eval-seed",
+        type=int,
+        default=42,
+        help="Fixed seed for checkpoint-selection and diagnostic evals. Use a negative value to disable fixed-seed eval.",
+    )
 
     parser.add_argument("--min-initial-rul", type=float, default=120.0)
     parser.add_argument(
@@ -350,7 +446,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--mlflow-tracking-uri", type=str, default="http://localhost:5000")
-    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v2")
+    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v3")
     return parser.parse_args()
 
 
@@ -358,6 +454,8 @@ def main() -> None:
     args = parse_args()
     if args.eligible_units == []:
         args.eligible_units = None
+    if args.eval_seed is not None and args.eval_seed < 0:
+        args.eval_seed = None
     load_or_train_ppo(args)
     print("✅ PPO System Ready!")
 
