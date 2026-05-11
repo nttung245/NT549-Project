@@ -42,7 +42,9 @@ def create_lstm_model(input_shape: tuple) -> Sequential:
 # Sequence Creation
 # ============================================================
 def create_sequences(data: pd.DataFrame, scaler, seq_length: int = SEQUENCE_LENGTH,
-                     all_features: list = None, sensor_only_list: list = None):
+                     all_features: list[str] | None = None,
+                     sensor_only_list: list[str] | None = None,
+                     is_test: bool | None = None):
     """
     Create sliding window sequences for LSTM.
     Handles 'Final Sequence only' (for test set) and 'All sequences' (for training).
@@ -54,7 +56,12 @@ def create_sequences(data: pd.DataFrame, scaler, seq_length: int = SEQUENCE_LENG
 
     X, y = [], []
     has_rul = 'RUL' in data.columns
-    is_test_set = not has_rul  # Giả định nếu không có RUL (chưa dán nhãn) là tập test
+    
+    # If is_test is not explicitly provided, infer from presence of RUL
+    if is_test is None:
+        is_test_set = not has_rul
+    else:
+        is_test_set = is_test
 
     for unit_nr in data['unit_nr'].unique():
         unit_data = data[data['unit_nr'] == unit_nr]

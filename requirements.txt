@@ -1,0 +1,13 @@
+numpy
+pandas
+scikit-learn
+tensorflow
+gymnasium
+stable-baselines3
+simpy
+matplotlib
+seaborn
+ipykernel
+tensorboard
+pygame
+mlflow>=3.12.0

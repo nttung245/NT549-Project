@@ -78,7 +78,8 @@ def draw_env(screen, env, font, step, action, total_reward):
     info_text = f"Alt: {env.twin.altitude:.0f} m | Fuel: {env.twin.fuel:.1f}/{env.FUEL_CAPACITY} | RUL: {env.twin.current_rul if env.twin.current_rul else 0:.1f} cycles"
     screen.blit(font.render(info_text, True, BLACK), (20, status_y + 25))
     
-    act_str = "LAND" if action == 1 else "FLY" if action == 0 else "NONE"
+    act_labels = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
+    act_str = act_labels.get(action, "NONE")
     act_color = RED if action == 1 else BLUE
     act_surf = font.render(f"Last Action: {act_str}", True, act_color)
     screen.blit(act_surf, (20, status_y + 50))
@@ -120,7 +121,7 @@ def main():
     # 3. Create Environment
     env = AircraftEnv(
         fleet_data=train_rolling,
-        model=lstm_model,
+        model_path=lstm_model,
         scaler=scaler,
         sensor_list=KEY_SENSORS,
         features_list=FEATURES
@@ -172,11 +173,12 @@ def main():
             # Policy: Dummy heuristic or random action for demo
             # Let's use a very basic heuristic:
             dist_closest = env._dist_to_nearest_airport()
-            current_rul = env.twin.current_rul if env.twin.current_rul else 150
+            # env.twin is set after reset(), so we can safely access it
+            current_rul = env.twin.current_rul if env.twin and env.twin.current_rul else 150  # type: ignore
             action = 0  # fly
             
             # If RUL or fuel is dangerously low and we are close to an airport
-            if (current_rul < 30 or env.twin.fuel < 20) and env.flight_phase == "CRUISING":
+            if (current_rul < 30 or (env.twin and env.twin.fuel < 20)) and env.flight_phase == "CRUISING":  # type: ignore
                 if dist_closest < env.LANDING_THRESHOLD:
                     action = 1
             

@@ -6,6 +6,9 @@ dist/
 wheels/
 *.egg-info
 
+mlruns/
+logs/
+
 project-3a51a40b-8c9e-4126-804-e786f68d310d.json
 
 # Virtual environments

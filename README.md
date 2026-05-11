@@ -1,10 +1,12 @@
+[🏠 Home](./README.md) | [📜 History](./history.md)
+
 # ✈️ Aircraft Digital Twin - Predictive Maintenance (PPO & LSTM)
 
 Dự án này triển khai một hệ thống **Bản sao số (Digital Twin)** cho động cơ máy bay, kết hợp giữa mô hình học sâu (Deep Learning) để dự báo sức khỏe động cơ và học tăng cường (Reinforcement Learning) để đưa ra các quyết định vận hành tối ưu.
 
 ## 🌟 Tổng quan dự án
 
-Hệ thống cung cấp một giải pháp bảo trì dự báo (Predictive Maintenance) thông minh, giúp trả lời câu hỏi: *"Máy bay có nên tiếp tục hành trình bay tiếp theo hay cần hạ cánh để bảo trì ngay lập tức?"*
+Hệ thống cung cấp một giải pháp bảo trì dự báo (Predictive Maintenance) thông minh, giúp trả lời câu hỏi: _"Máy bay có nên tiếp tục hành trình bay tiếp theo hay cần hạ cánh để bảo trì ngay lập tức?"_
 
 - **Dataset**: Sử dụng tập dữ liệu CMAPSS (NASA) về sự suy giảm hiệu suất động cơ phản lực.
 - **AI Core**: Sử dụng **LSTM** để dự báo thời gian còn lại đến khi hỏng (RUL - Remaining Useful Life).
@@ -26,7 +28,7 @@ Dự án được cấu trúc thành các thành phần chính sau:
 
 ## 🌊 Luồng hoạt động (System Flow)
 
-Dưới đây là sơ đồ luồng hoạt động của toàn bộ hệ thống từ lúc nạp dữ liệu đến khi ra quyết định:
+Hệ thống quản lý hành trình bay thông qua 3 hành động điều khiển độ cao và tốc độ:
 
 ```mermaid
 graph TD
@@ -36,51 +38,62 @@ graph TD
     C -- No --> E[Load Existing Model]
     D --> F[Remaining Useful Life - RUL Prediction]
     E --> F
-    
+
     subgraph "Digital Twin Simulation"
         F --> G[Update Digital Twin Status]
         H[Fuel/Altitude/Velocity] --> G
         G --> I[Observation Space: RUL, Fuel, Distance...]
     end
-    
+
     I --> J[RL Agent - PPO]
     J --> K{Action Decision}
-    K -- FLY --> L[Next Leg - Consume Fuel & Wear Engine]
-    K -- LAND --> M[Maintenance & Refuel]
-    
+    K -- 0: CRUISE --> L[Maintain Altitude - Fast]
+    K -- 1: DESCEND --> M[Lower Altitude - Approach]
+    K -- 2: CLIMB --> O[Increase Altitude - High Fuel]
+
     L --> G
-    M --> N[Reset State]
+    M -- Land at Airport --> N[Reset State & Refuel]
+    O --> G
     N --> G
 ```
 
 ### Chi tiết các bước:
+
 1.  **Nạp & Xử lý dữ liệu**: Dữ liệu từ 21 cảm biến được chuẩn hóa về khoảng `[0, 1]`. Chúng tôi tạo các window 50 chu kỳ để nắm bắt xu hướng suy giảm của động cơ.
 2.  **Dự báo RUL**: Mô hình LSTM nhận đầu vào là chuỗi cảm biến hiện tại và trả về con số dự báo động cơ còn bao nhiêu chu kỳ nữa sẽ hỏng.
 3.  **Cập nhật Bản sao số**: Bản sao số nhận giá trị RUL này để chuyển đổi sang các cấp độ: `HEALTHY`, `WARNING`, hoặc `CRITICAL`.
 4.  **Học tăng cường (RL)**: Agent quan sát trạng thái (RUL hiện tại, lượng xăng còn lại, khoảng cách tới đích) để chọn hành động:
-    - **FLY**: Tiếp tục chặng bay. Nếu RUL chạm 0 khi đang bay -> **FAILURE** (Thất bại).
-    - **LAND**: Hạ cánh để bảo trì. Động cơ sẽ được thay mới và nạp đầy xăng -> **SUCCESSFUL MAINTENANCE**.
-5.  **Tối ưu hóa**: Agent được thưởng cho mỗi km bay xa hơn và bị phạt rất nặng nếu để xảy ra sự cố hỏng hóc giữa không trung.
+    - **0: CRUISE**: Giữ độ cao, bay với tốc độ cao nhất (25.0).
+    - **1: DESCEND**: Hạ độ cao để tiếp cận sân bay phụ hoặc điểm đích. Máy bay chỉ có thể hạ cánh khi `Altitude = 0` tại sân bay.
+    - **2: CLIMB**: Leo cao. Hành động này tiêu thụ nhiều nhiên liệu hơn nhưng có thể cần thiết cho các chiến lược bay cụ thể.
+5.  **Tối ưu hóa**: Agent được thưởng cho mỗi km tiến về đích và thưởng lớn khi hạ cánh an toàn. Phạt nặng nếu để xảy ra sự cố (hết xăng hoặc hỏng động cơ giữa không trung).
 
 ---
 
 ## 🚀 Hướng dẫn khởi chạy
 
 ### 1. Cài đặt môi trường
+
 Yêu cầu Python 3.10+ và các thư viện cần thiết:
+
 ```bash
 pip install -r requirements.txt
 ```
-*(Nếu chưa có file requirements.txt, hãy cài đặt: tensorflow, stable-baselines3, shimmy, gym, pandas, scikit-learn)*
+
+_(Nếu chưa có file requirements.txt, hãy cài đặt: tensorflow, stable-baselines3, shimmy, gym, pandas, scikit-learn)_
 
 ### 2. Chạy Demo
+
 Khởi chạy file chính để xem mô phỏng hệ thống với các hành động ngẫu nhiên hoặc huấn luyện mô hình:
+
 ```bash
 python main.py
 ```
 
 ### 3. Huấn luyện Agent (PPO)
+
 Để hệ thống tự học cách bay tối ưu:
+
 ```bash
 python scripts/train_ppo.py
 ```
@@ -88,8 +101,10 @@ python scripts/train_ppo.py
 ---
 
 ## 📊 Kết quả mong đợi
+
 - **RUL Prediction**: Sai số thấp hơn mô hình Random Forest thông thường.
 - **Flight Strategy**: Agent biết hạ cánh đúng lúc khi RUL thấp (CRITICAL) nhưng không quá sớm để lãng phí nhiên liệu và chi phí vận hành.
 
 ---
-*Ghi chú: Bản thiết kế hạ tầng (Terraform) hiện đang được ẩn đi để tập trung vào logic lõi của Digital Twin.*
+
+_Ghi chú: Bản thiết kế hạ tầng (Terraform) hiện đang được ẩn đi để tập trung vào logic lõi của Digital Twin._
