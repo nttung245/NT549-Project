@@ -28,4 +28,4 @@ RUN pip install --no-cache-dir .
 EXPOSE 5000 6006
 
 # Default command
-CMD ["python", "scripts/train_ppo.py"]
+CMD ["python", "-m", "scripts.training.train_ppo"]

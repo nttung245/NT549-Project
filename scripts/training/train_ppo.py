@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 import os
 
-# TensorFlow is imported indirectly by scripts.lstm_model and inside each
+# TensorFlow is imported indirectly by scripts.models.lstm_model and inside each
 # AircraftEnv worker. Configure runtime before any TensorFlow import so CPU-only
 # machines do not spam CUDA/oneDNN initialization warnings in every subprocess.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
@@ -31,13 +31,13 @@ from typing import Callable
 import mlflow
 
 # Ensure project root is importable when the script is executed directly.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.data_processor import FEATURES, KEY_SENSORS, prepare_data
-from scripts.lstm_model import create_sequences, train_model
-from scripts.aircraft_env import AircraftEnv
-from scripts.rl_callbacks import (
+from scripts.data.data_processor import FEATURES, KEY_SENSORS, prepare_data
+from scripts.models.lstm_model import create_sequences, train_model
+from scripts.core.aircraft_env import AircraftEnv
+from scripts.training.rl_callbacks import (
     EntCoefScheduleCallback,
     EvalDiagnosticsCallback,
     FixedSeedEvalCallback,

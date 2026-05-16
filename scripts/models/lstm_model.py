@@ -11,7 +11,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
-from scripts.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
+from scripts.data.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
 
 
 # ============================================================

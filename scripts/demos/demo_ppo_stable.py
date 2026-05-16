@@ -6,12 +6,12 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-# Add project root to path for imports
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path for imports when executed directly.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.aircraft_env import AircraftEnv
-from scripts.data_processor import prepare_data, FEATURES, KEY_SENSORS
+from scripts.core.aircraft_env import AircraftEnv
+from scripts.data.data_processor import prepare_data, FEATURES, KEY_SENSORS
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run one PPO aircraft demo episode.")

@@ -16,7 +16,7 @@ This plan prioritizes stabilizing evaluation first, then improving PPO training 
 
 ### Evaluation settings are too noisy
 
-Current defaults in `scripts/train_ppo.py`:
+Current defaults in `scripts/training/train_ppo.py`:
 
 - `eval_n_episodes = 10`
 - `diag_n_episodes = 10`
@@ -51,7 +51,7 @@ Use more episodes per evaluation so each point is less affected by scenario luck
 Recommended full run:
 
 ```bash
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --eval-n-episodes 50 \
   --diag-n-episodes 30 \
@@ -63,7 +63,7 @@ uv run python scripts/train_ppo.py \
 Recommended lighter run:
 
 ```bash
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --eval-n-episodes 30 \
   --diag-n-episodes 20 \
@@ -155,7 +155,7 @@ Recommended schedule:
 
 Rationale: early training benefits from faster updates, but late training should use smaller updates to reduce action-boundary flipping between `CRUISE`, `DESCEND`, and `CLIMB`.
 
-Implementation note: Stable-Baselines3 PPO accepts callable schedules for `learning_rate`, so this can be implemented directly in `scripts/train_ppo.py` by parsing a schedule option and passing a function instead of a fixed float.
+Implementation note: Stable-Baselines3 PPO accepts callable schedules for `learning_rate`, so this can be implemented directly in `scripts/training/train_ppo.py` by parsing a schedule option and passing a function instead of a fixed float.
 
 ### 6. Increase batch size
 
@@ -190,10 +190,10 @@ learning_rate: 3e-4 -> 1e-4 -> 3e-5
 ent_coef:      0.05 -> 0.02 -> 0.005
 ```
 
-If schedule support is implemented in `scripts/train_ppo.py`, use a run like:
+If schedule support is implemented in `scripts/training/train_ppo.py`, use a run like:
 
 ```bash
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --total-timesteps 1500000 \
   --learning-rate-schedule linear:3e-4:3e-5 \
@@ -210,7 +210,7 @@ If schedule support is not implemented yet, approximate it with staged fine-tuni
 
 ```bash
 # Stage 1: exploration
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --total-timesteps 500000 \
   --learning-rate 3e-4 \
@@ -218,7 +218,7 @@ uv run python scripts/train_ppo.py \
   --batch-size 256
 
 # Stage 2: transition
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --total-timesteps 500000 \
   --learning-rate 1e-4 \
@@ -226,7 +226,7 @@ uv run python scripts/train_ppo.py \
   --batch-size 256
 
 # Stage 3: stabilization
-uv run python scripts/train_ppo.py \
+uv run python -m scripts.training.train_ppo \
   --force-train \
   --total-timesteps 500000 \
   --learning-rate 3e-5 \

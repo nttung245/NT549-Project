@@ -2,8 +2,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from scripts.lstm_model import create_sequences
-from scripts.data_processor import FEATURES, SEQUENCE_LENGTH
+from scripts.models.lstm_model import create_sequences
+from scripts.data.data_processor import FEATURES, SEQUENCE_LENGTH
 
 def evaluate_lstm_performance(model, test_rolling, true_rul, scaler):
     """
@@ -58,12 +58,12 @@ def plot_engine_degradation(model, test_rolling, engine_id, scaler, seq_len=SEQU
     # Scale data
     scaled_data = scaler.transform(engine_data[FEATURES])
     # IMPORTANT: Assumes FEATURES matches model expectations (e.g., sensor only)
-    # The current model in scripts/lstm_model.py uses input_shape=(None, len(sensor_only_list))
+    # The current model in scripts/models/lstm_model.py uses input_shape=(None, len(sensor_only_list))
     # We need to extract just the sensors.
     # In data_processor.py, FEATURES = KEY_SENSORS + ['time_cycles'] (15 features)
     # The create_sequences logic uses sensor_only_list.
     
-    from scripts.data_processor import KEY_SENSORS
+    from scripts.data.data_processor import KEY_SENSORS
     sensor_indices = [FEATURES.index(s) for s in KEY_SENSORS]
     sensors = scaled_data[:, sensor_indices]
     

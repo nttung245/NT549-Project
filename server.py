@@ -12,9 +12,9 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.data_processor import prepare_data, FEATURES, KEY_SENSORS
-from scripts.aircraft_env import AircraftEnv
-from scripts.digital_twin import AircraftDigitalTwin
+from scripts.data.data_processor import prepare_data, FEATURES, KEY_SENSORS
+from scripts.core.aircraft_env import AircraftEnv
+from scripts.core.digital_twin import AircraftDigitalTwin
 
 # RL Components
 from stable_baselines3 import PPO
@@ -104,20 +104,30 @@ def update_current_state(obs, info, reward, step, action_str):
     global current_state
     if env is None:
         return
-    # obs = [Altitude, Velocity, Fuel, Current_RUL, Dist_AP1, Dist_AP2, Dist_AP3, Dist_AP4, Dist_AP5, Dist_Dest]
+    # obs = [Altitude, Fuel, Effective_RUL, Dist_AP1..AP6, Dist_Dest,
+    #        In_Approach_Zone, Wind, Fuel_Mult, RUL_Mult, Next_Hazard_Dist, Next_Hazard_Type]
     # "dist_next" in UI should show the distance to the closest airport AHEAD.
-    airport_dists = obs[4:9]
+    airport_dists = obs[3:9]
     dists_ahead = [d for d in airport_dists if d > 0]
     dist_next = min(dists_ahead) if dists_ahead else obs[9] # Fallback to destination if all passed
+    twin = env.twin
 
     current_state = {
         "step": step,
         "altitude": float(obs[0]),
-        "velocity": float(obs[1]),
-        "fuel": float(obs[2]),
-        "rul": float(obs[3]),
+        "velocity": float(twin.velocity if twin is not None else 0.0),
+        "fuel": float(obs[1]),
+        "rul": float(obs[2]),
         "dist_next": float(dist_next),
         "dist_dest": float(obs[9]),
+        "in_approach_zone": bool(obs[10] > 0.5),
+        "wind_strength": float(obs[11]),
+        "weather_fuel_multiplier": float(obs[12]),
+        "weather_rul_multiplier": float(obs[13]),
+        "next_hazard_distance": float(obs[14]),
+        "next_hazard_type": int(obs[15]),
+        "weather": str(info.get("weather", "clear")),
+        "weather_zones": env.weather_map.to_dicts(),
         "fuel_capacity": float(env.FUEL_CAPACITY),
         "total_distance": float(env.TOTAL_DISTANCE),
         "sub_airports": [float(x) for x in env.sub_airports],
@@ -155,7 +165,8 @@ async def simulation_loop():
                 twin = active_env.twin
                 if twin is None:
                     raise RuntimeError("Environment must be reset before simulation loop runs.")
-                current_rul = twin.current_rul if twin.current_rul else 150
+                raw_obs = active_env._get_obs()
+                current_rul = float(raw_obs[2])
                 action = 0  # Default fly
                 if (current_rul < 30 or twin.fuel < 20) and active_env.flight_phase == "CRUISING":
                     if dist_closest < active_env.LANDING_THRESHOLD:

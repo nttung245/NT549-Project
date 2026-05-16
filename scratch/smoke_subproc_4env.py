@@ -9,8 +9,8 @@ model_path = os.path.join(PROJECT_ROOT, "models", "lstm_rul_model.keras")
 
 
 def make_env():
-    from scripts.aircraft_env import AircraftEnv
-    from scripts.data_processor import FEATURES, KEY_SENSORS, prepare_data
+    from scripts.core.aircraft_env import AircraftEnv
+    from scripts.data.data_processor import FEATURES, KEY_SENSORS, prepare_data
 
     data_dir = os.path.join(PROJECT_ROOT, "CMAPSSData")
     train_rolling, _, _, scaler = prepare_data(data_dir)

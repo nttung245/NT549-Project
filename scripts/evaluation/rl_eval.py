@@ -2,8 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scripts.aircraft_env import AircraftEnv
-from scripts.data_processor import FEATURES, KEY_SENSORS
+from scripts.core.aircraft_env import AircraftEnv
+from scripts.data.data_processor import FEATURES, KEY_SENSORS
 
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 

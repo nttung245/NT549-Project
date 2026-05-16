@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore", message="X does not have valid feature names")
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
-from scripts.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
+from scripts.data.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
 
 
 class AircraftDigitalTwin:

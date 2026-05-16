@@ -9,22 +9,22 @@
 - Notebook training behavior needed a reproducible script with MLflow, VecNormalize, and deterministic best-model eval.
 
 ### Changes
-- `scripts/aircraft_env.py`:
+- `scripts/core/aircraft_env.py`:
   - Added `eligible_units`, `min_initial_rul`, and `maintenance_resets_health` controls.
   - Maintenance is now an intermediate checkpoint: successful subairport landing refuels and resets/swaps engine health/RUL, then route continues.
   - Reduced `MAX_ALTITUDE` to `5000`, reduced `CLIMB_RATE` to `500`, removed altitude cruise bonus, and increased feasible approach `DESCEND` reward.
-- `scripts/train_ppo.py`:
+- `scripts/training/train_ppo.py`:
   - Rebuilt CLI training flow to match notebook PPO: `SubprocVecEnv`, `VecNormalize`, `EvalCallback`, diagnostics callbacks, and MLflow params/artifacts.
   - Uses deterministic eval for best-model selection; stochastic eval remains diagnostics-only.
   - Defaults to a 3-engine medium-RUL curriculum subset `[14, 62, 3]` with initial RUL near `150`.
   - Defaults PPO device to CPU and sets TensorFlow runtime env vars to reduce CUDA/oneDNN warning noise.
-- `scripts/rl_eval.py`:
+- `scripts/evaluation/rl_eval.py`:
   - Evaluates with saved `VecNormalize` stats, deterministic by default, and route-level success metrics.
-- `scripts/rl_callbacks.py`:
+- `scripts/training/rl_callbacks.py`:
   - Keeps normalization sync, VecNormalize best-stat saving, MLflow logging, and deterministic/stochastic diagnostics.
 
 ### Validation
-- `.venv/bin/python -m py_compile scripts/train_ppo.py scripts/aircraft_env.py scripts/rl_eval.py scripts/rl_callbacks.py` passed.
+- `.venv/bin/python -m py_compile scripts/training/train_ppo.py scripts/core/aircraft_env.py scripts/evaluation/rl_eval.py scripts/training/rl_callbacks.py` passed.
 - Confirmed default training engine subset: `[14, 62, 3]`.
 
 ---
@@ -38,19 +38,19 @@
 
 ### Changes
 - Switched PPO inference/eval paths to stochastic sampling (`deterministic=False`) so evaluation/demo/server behavior matches PPO rollout training policy:
-  - `scripts/rl_eval.py`
-  - `scripts/demo_ppo_stable.py`
-  - `scripts/rl_callbacks.py`
-  - `scripts/train_ppo.py`
+  - `scripts/evaluation/rl_eval.py`
+  - `scripts/demos/demo_ppo_stable.py`
+  - `scripts/training/rl_callbacks.py`
+  - `scripts/training/train_ppo.py`
   - `server.py`
-- Updated `scripts/aircraft_env.py` grounded handling:
+- Updated `scripts/core/aircraft_env.py` grounded handling:
   - If grounded and action is `CRUISE` or `DESCEND`, aircraft does not move, does not burn fuel, stays `GROUNDED`, and receives a small invalid-ground-action penalty.
   - Only `CLIMB` can resume the route after maintenance.
   - `RUL <= 0` crash is ignored while `flight_phase == "GROUNDED"`.
-- Fixed safe-landing histogram in `scripts/rl_eval.py` to count `ARRIVED` and `MAINTAINED` instead of stale `LANDED`.
+- Fixed safe-landing histogram in `scripts/evaluation/rl_eval.py` to count `ARRIVED` and `MAINTAINED` instead of stale `LANDED`.
 
 ### Validation
-- `python3 -m py_compile scripts/aircraft_env.py scripts/rl_eval.py scripts/rl_callbacks.py scripts/demo_ppo_stable.py scripts/train_ppo.py server.py` passed.
+- `python3 -m py_compile scripts/core/aircraft_env.py scripts/evaluation/rl_eval.py scripts/training/rl_callbacks.py scripts/demos/demo_ppo_stable.py scripts/training/train_ppo.py server.py` passed.
 
 ---
 
@@ -63,7 +63,7 @@
 - Notebook `SubprocVecEnv` factory captured pandas/scaler objects, causing pickle errors with multiprocessing.
 
 ### Changes
-- `scripts/aircraft_env.py`:
+- `scripts/core/aircraft_env.py`:
   - `MAINTAINED` is now non-terminal (`done=False`).
   - Maintenance landing sets `altitude=0`, `velocity=0`, `fuel=FUEL_CAPACITY`, `flight_phase="GROUNDED"`.
   - Reset `dist_since_last_maintenance=0` after maintenance.
@@ -91,7 +91,7 @@
 - Hyperparameters in notebook drifted from earlier recommendations.
 
 ### Changes
-- `scripts/aircraft_env.py` reward/physics tuning:
+- `scripts/core/aircraft_env.py` reward/physics tuning:
   - Reduced progress reward from `distance_covered / 1000` to `/ 1500`.
   - Added small altitude-efficiency reward only for `CRUISE` at higher altitude.
   - Added landing feasibility checks using remaining descent steps and descent distance.
@@ -101,7 +101,7 @@
   - Increased crash/fuel/timeout penalties.
   - Added landing accuracy bonus for maintenance.
   - Added detailed `info` diagnostics: reward components, altitude, fuel, RUL, position, next target distance, nearest airport distance, approach zone, feasibility, descent requirements, phase.
-- `scripts/rl_callbacks.py`:
+- `scripts/training/rl_callbacks.py`:
   - Added `EvalDiagnosticsCallback` with action ratios, event counts, mean reward/length/final altitude, first descend distance, landing feasible ratio.
   - Syncs `VecNormalize.obs_rms` from train env before probes.
 - `demo_flow.ipynb`:
@@ -123,7 +123,7 @@
 - Deterministic eval often crashed because the approach window and landing threshold were inconsistent with descent distance from high altitude.
 
 ### Changes
-- `scripts/aircraft_env.py`:
+- `scripts/core/aircraft_env.py`:
   - `CRUISE` speed now scales with altitude: about `25` at ground to `40` at `12000m`.
   - Fuel rate decreases with altitude: about `0.5` at ground to `0.3` at `12000m`.
   - `LANDING_THRESHOLD` adjusted to `400`.
@@ -143,7 +143,7 @@
 - Landing reward was too sparse, startup from ground made the task harder, and entropy was too low.
 
 ### Changes
-- `scripts/aircraft_env.py`:
+- `scripts/core/aircraft_env.py`:
   - Added dense approach reward to guide descent near airports.
   - Reduced `DESCEND_RATE` from `1000` to `500` for smoother descent.
   - Increased `LANDING_THRESHOLD` from `300` to `500` at that stage.
@@ -152,7 +152,7 @@
   - Removed old takeoff/idle branch.
   - Added timeout penalty.
   - Redesigned observation to 11 dimensions: altitude, fuel, RUL, six signed airport distances, destination distance, approach-zone flag.
-- `scripts/train_ppo.py`:
+- `scripts/training/train_ppo.py`:
   - Increased `ent_coef` to `0.05`.
   - Increased total training timesteps to `1,000,000`.
 
@@ -169,7 +169,7 @@
 - Naively making maintenance reward positive introduced a CLIMB/DESCEND farming exploit near the same airport.
 
 ### Changes
-- `scripts/aircraft_env.py`:
+- `scripts/core/aircraft_env.py`:
   - Set `FUEL_CAPACITY=250` so at least one maintenance/refuel is needed for the full route.
   - Reduced airport noise to `±200` for lower variance.
   - Added `MAX_STEPS` and `current_step`.
