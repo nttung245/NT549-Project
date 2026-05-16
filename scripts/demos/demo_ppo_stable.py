@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument(
         "--run-name",
         type=str,
-        default="PPO_Run_20260510_124810",
+        default="PPO_Run_20260516_143227",
         help="PPO run name under models/best_ppo_<run-name>.",
     )
     parser.add_argument(
@@ -105,6 +105,7 @@ obs = env.reset()  # VecEnv.reset() returns observation (handled automatically)
 done = False
 steps = 0
 total_reward = 0
+last_info = {}
 action_names = {0: "CRUISE", 1: "DESCEND", 2: "CLIMB"}
 
 # Get raw env for accessing actual values (not normalized)
@@ -129,24 +130,28 @@ while not done and steps < args.max_steps:
     total_reward += reward[0]
     steps += 1
     
-    # Print status every 2 steps or on special events
-    if steps % 2 == 0 or done or 'event' in info_array[0]:
+    info = info_array[0]
+    last_info = info
+
+    # Print status every 2 steps or on special events. Use `info` values instead
+    # of raw_env after terminal steps because VecEnv auto-resets completed envs.
+    if steps % 2 == 0 or done or 'event' in info:
         act_name = action_names.get(int(action[0]), "UNKNOWN")
         twin = raw_env.twin
-        
-        # Handle RUL value to avoid None errors
-        rul_display = twin.current_rul if twin.current_rul is not None else 0.0
-        
-        # Find next airport ahead
-        current_pos = raw_env.TOTAL_DISTANCE - raw_env.distance_to_destination
-        ahead = [ap - current_pos for ap in raw_env.sub_airports if (ap - current_pos) > 0]
-        dist_ap = min(ahead) if ahead else 0
-        
-        print(f"Step {steps:>4} | Action: {act_name:>7} | Alt: {twin.altitude:>5.0f}m | "
-              f"RUL: {rul_display:>5.1f} | Fuel: {twin.fuel:>5.1f} | "
-              f"Next AP: {dist_ap:>6.0f} | Dest: {raw_env.distance_to_destination:>6.0f}")
+
+        altitude_display = float(info.get("altitude", twin.altitude))
+        rul_display = float(info.get("rul", twin.current_rul if twin.current_rul is not None else 0.0))
+        fuel_display = float(info.get("fuel", twin.fuel))
+        next_target_display = float(info.get("dist_to_next_target", 0.0))
+        dest_display = float(info.get("distance_to_destination", raw_env.distance_to_destination))
+        event_display = f" | Event: {info['event']}" if 'event' in info else ""
+
+        print(f"Step {steps:>4} | Action: {act_name:>7} | Alt: {altitude_display:>5.0f}m | "
+              f"RUL: {rul_display:>5.1f} | Fuel: {fuel_display:>5.1f} | "
+              f"Next Target: {next_target_display:>6.0f} | Dest: {dest_display:>6.0f}"
+              f"{event_display}")
 
 print("=" * 80)
-final_event = info_array[0].get('event', 'TIMEOUT')
+final_event = last_info.get('event', 'TIMEOUT')
 print(f"🛬 END: {final_event}")
 print(f"   Total Steps: {steps} | Total Reward: {total_reward:.2f}")
