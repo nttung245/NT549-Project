@@ -198,11 +198,25 @@ def load_or_train_ppo(args: argparse.Namespace):
 
     if (repo_ppo_path.with_suffix(".zip")).exists() and stats_path.exists() and not args.force_train:
         print(f"📦 Loading existing PPO agent and VecNormalize stats from: {repo_ppo_path}")
-        train_env = make_vec_env(make_env, n_envs=1)
-        train_env = VecNormalize.load(str(stats_path), train_env)
-        train_env.training = False
-        train_env.norm_reward = False
-        ppo_model = PPO.load(str(repo_ppo_path), env=train_env, device=args.device)
+        raw_train_env = make_vec_env(make_env, n_envs=1)
+        train_env = None
+        try:
+            train_env = VecNormalize.load(str(stats_path), raw_train_env)
+            train_env.training = False
+            train_env.norm_reward = False
+            ppo_model = PPO.load(str(repo_ppo_path), env=train_env, device=args.device)
+        except (AssertionError, ValueError) as exc:
+            if train_env is not None:
+                train_env.close()
+            else:
+                raw_train_env.close()
+            current_shape = getattr(raw_train_env.observation_space, "shape", None)
+            raise RuntimeError(
+                "Existing PPO/VecNormalize artifacts are incompatible with the current AircraftEnv "
+                f"observation space {current_shape}. This usually means the environment features changed "
+                "after the model was trained. Re-run with --force-train or choose a newer --run-name. "
+                f"Model path: {repo_ppo_path.with_suffix('.zip')}; VecNormalize path: {stats_path}."
+            ) from exc
         return ppo_model, train_env, run_name, repo_ppo_path, stats_path, best_model_dir
 
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI") or args.mlflow_tracking_uri
