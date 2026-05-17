@@ -40,9 +40,27 @@ lstm_model = None
 ppo_model = None
 vec_normalize = None
 
+def _parse_float_env(name: str, default: float | None) -> float | None:
+    raw_value = os.environ.get(name)
+    if raw_value is None or raw_value.strip().lower() in {"", "none", "all", "open"}:
+        return default
+    return float(raw_value)
+
+
+def _parse_eligible_units(raw_value: str | None) -> list[int] | None:
+    if raw_value is None or raw_value.strip().lower() in {"", "all", "none"}:
+        return None
+    return [int(part.strip()) for part in raw_value.split(",") if part.strip()]
+
+
 # Match the latest trained PPO run used by the stable demo.
 DEFAULT_PPO_RUN_NAME = os.environ.get("PPO_RUN_NAME", "PPO_Run_20260516_143227")
-DEFAULT_ELIGIBLE_UNITS = [14, 62, 3]
+MIN_INITIAL_RUL = _parse_float_env("MIN_INITIAL_RUL", 120.0)
+INITIAL_RUL_MAX = _parse_float_env("INITIAL_RUL_MAX", None)
+DEFAULT_ELIGIBLE_UNITS = _parse_eligible_units(os.environ.get("ELIGIBLE_UNITS"))
+POLICY_MODE = os.environ.get("POLICY_MODE", "deterministic").strip().lower()
+if POLICY_MODE not in {"deterministic", "stochastic"}:
+    POLICY_MODE = "deterministic"
 
 @app.on_event("startup")
 async def startup_event():
@@ -70,6 +88,8 @@ async def startup_event():
         sensor_list=KEY_SENSORS,
         features_list=FEATURES,
         eligible_units=DEFAULT_ELIGIBLE_UNITS,
+        min_initial_rul=float(MIN_INITIAL_RUL or 0.0),
+        initial_rul_max=INITIAL_RUL_MAX,
     )
     
     obs, info = env.reset()
@@ -78,6 +98,11 @@ async def startup_event():
     best_ppo_dir = os.path.join(PROJECT_ROOT, "models", f"best_ppo_{DEFAULT_PPO_RUN_NAME}")
     ppo_path = os.path.join(best_ppo_dir, "best_model.zip")
     stats_path = os.path.join(best_ppo_dir, "vec_normalize.pkl")
+    print(
+        "[CONFIG] RUL band: "
+        f"min={MIN_INITIAL_RUL}, max={INITIAL_RUL_MAX}, eligible_units={DEFAULT_ELIGIBLE_UNITS or 'all'}"
+    )
+    print(f"[CONFIG] Policy mode for UI: {POLICY_MODE}")
     print(f"🔎 PPO run for UI: {DEFAULT_PPO_RUN_NAME}")
     print(f"🔎 PPO model path: {ppo_path}")
     print(f"🔎 VecNormalize path: {stats_path}")
@@ -115,7 +140,9 @@ def update_current_state(obs, info, reward, step, action_str):
     if env is None:
         return
     # obs = [Altitude, Fuel, Effective_RUL, Dist_AP1..AP6, Dist_Dest,
-    #        In_Approach_Zone, Wind, Fuel_Mult, RUL_Mult, Next_Hazard_Dist, Next_Hazard_Type]
+    #        In_Approach_Zone, Wind, Fuel_Mult, RUL_Mult, Next_Hazard_Dist,
+    #        Next_Hazard_Type, Next_Hazard_Alt_Min, Next_Hazard_Alt_Max,
+    #        Next_Hazard_Speed_Multiplier]
     # "dist_next" in UI should show the distance to the closest airport AHEAD.
     airport_dists = obs[3:9]
     dists_ahead = [d for d in airport_dists if d > 0]
@@ -134,10 +161,17 @@ def update_current_state(obs, info, reward, step, action_str):
         "wind_strength": float(obs[11]),
         "weather_fuel_multiplier": float(obs[12]),
         "weather_rul_multiplier": float(obs[13]),
+        "weather_speed_multiplier": float(info.get("weather_speed_multiplier", 1.0)),
         "next_hazard_distance": float(obs[14]),
         "next_hazard_type": int(obs[15]),
+        "next_hazard_alt_min": float(obs[16]) if len(obs) > 16 else 0.0,
+        "next_hazard_alt_max": float(obs[17]) if len(obs) > 17 else float(env.MAX_ALTITUDE),
+        "next_hazard_speed_multiplier": float(obs[18]) if len(obs) > 18 else 1.0,
         "weather": str(info.get("weather", "clear")),
         "weather_zones": env.weather_map.to_dicts(),
+        "policy_mode": POLICY_MODE,
+        "maintenance_pressure": float(info.get("maintenance_pressure", 0.0)),
+        "landing_feasible_now": bool(info.get("landing_feasible_now", False)),
         "fuel_capacity": float(env.FUEL_CAPACITY),
         "total_distance": float(env.TOTAL_DISTANCE),
         "sub_airports": [float(x) for x in env.sub_airports],
@@ -165,9 +199,8 @@ async def simulation_loop():
             if ppo_model and vec_normalize:
                 # 1. Normalize observation
                 norm_obs = vec_normalize.normalize_obs(obs)
-                # 2. Predict action with the stochastic policy used during PPO training.
-                # Deterministic argmax can collapse to the single highest-probability action.
-                action, _ = ppo_model.predict(norm_obs, deterministic=False)
+                deterministic = POLICY_MODE != "stochastic"
+                action, _ = ppo_model.predict(norm_obs, deterministic=deterministic)
                 action = int(action)
             else:
                 # Simple heuristic policy fallback
