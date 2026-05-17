@@ -8,41 +8,33 @@ export default function Home() {
   const { state, connected, sendCommand } = useSimulation();
 
   return (
-    <main className="min-h-screen pt-12 pb-24 px-6 md:px-12 selection:bg-indigo-500/30">
-      {/* Decorative Lights */}
-      <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-600/20 blur-[120px] rounded-full pointer-events-none" />
-      <div className="absolute bottom-[10%] right-[-10%] w-[30%] h-[30%] bg-cyan-600/10 blur-[120px] rounded-full pointer-events-none" />
-
-      <div className="max-w-6xl mx-auto relative z-10">
-        
-        {/* Header */}
-        <header className="flex justify-between items-end mb-10 pb-6 border-b border-white/10">
+    <main className="min-h-screen bg-[linear-gradient(180deg,#06111f_0%,#0f172a_48%,#111827_100%)] px-4 py-8 selection:bg-cyan-500/30 md:px-8">
+      <div className="relative z-10 mx-auto max-w-7xl">
+        <header className="mb-6 flex flex-col gap-4 border-b border-slate-700 pb-5 md:flex-row md:items-end md:justify-between">
           <div>
-            <h1 className="text-4xl md:text-5xl font-extrabold tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">
-              Antigravity Engine
+            <h1 className="text-3xl font-extrabold tracking-tight text-white md:text-5xl">
+              Aircraft Digital Twin
             </h1>
-            <p className="text-slate-400 mt-2 text-lg font-medium tracking-wide">
-              Predictive Maintenance Simulation
+            <p className="mt-2 text-base font-medium tracking-wide text-slate-400 md:text-lg">
+              PPO route control with live engine risk and weather hazards
             </p>
           </div>
-          <div className="flex items-center space-x-3 mb-2 px-4 py-2 bg-slate-800/50 rounded-full border border-white/5">
+          <div className="flex w-fit items-center gap-3 rounded-md border border-slate-700 bg-slate-950/60 px-4 py-2">
             <span className="text-sm font-semibold text-slate-300">Server</span>
-            <div className={`w-3 h-3 rounded-full ${connected ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]' : 'bg-rose-500 shadow-[0_0_12px_rgba(244,63,94,0.8)]'} animate-pulse`} />
+            <div className={`h-3 w-3 rounded-full ${connected ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]' : 'bg-rose-500 shadow-[0_0_12px_rgba(244,63,94,0.8)]'} animate-pulse`} />
           </div>
         </header>
 
-        {/* 2D Environment Render */}
         <Environment2D state={state} />
 
-        {/* Dashboard */}
         <Dashboard
           state={state}
           onPlayPause={() => sendCommand('TOGGLE_PLAY')}
           onStepFly={() => sendCommand('FORCE_FLY')}
           onStepLand={() => sendCommand('FORCE_LAND')}
+          onStepClimb={() => sendCommand('FORCE_CLIMB')}
           onReset={() => sendCommand('RESET')}
         />
-
       </div>
     </main>
   );

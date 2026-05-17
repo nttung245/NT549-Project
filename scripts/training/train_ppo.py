@@ -42,6 +42,7 @@ from scripts.training.rl_callbacks import (
     EvalDiagnosticsCallback,
     FixedSeedEvalCallback,
     MLflowLoggingCallback,
+    RulCurriculumCallback,
     SaveVecNormalizeCallback,
     SyncVecNormalizeCallback,
 )
@@ -59,9 +60,10 @@ except ImportError:
     print("⚠️  stable-baselines3 not installed. Install with: pip install stable-baselines3")
 
 
-# Medium-RUL curriculum subset: high enough to avoid impossible starts, but low
-# enough that the agent should learn maintenance instead of always flying direct.
-DEFAULT_TRAIN_ELIGIBLE_UNITS = [14, 62, 3]
+# By default, train across all engines and let the RUL curriculum narrow the
+# sampled band. Passing --eligible-units still supports targeted experiments.
+DEFAULT_TRAIN_ELIGIBLE_UNITS = None
+DEFAULT_RUL_CURRICULUM = "0:140:170,0.3:170:260,0.65:120:335"
 
 
 def ensure_lstm_model(model_path: Path, train_rolling, scaler) -> None:
@@ -129,10 +131,45 @@ def schedule_start_value(schedule_spec: str | None, fallback: float) -> float:
     return float(schedule(0.0)) if schedule is not None else float(fallback)
 
 
+def parse_rul_curriculum(
+    spec: str | None,
+) -> list[tuple[float, float, float | None]] | None:
+    """
+    Parse "progress:min:max" curriculum stages.
+
+    Example: "0:140:170,0.3:170:260,0.65:120:335".
+    Use max as "none" for an open-ended upper bound.
+    """
+    if spec is None or spec.strip().lower() in {"", "none", "off", "fixed"}:
+        return None
+
+    stages: list[tuple[float, float, float | None]] = []
+    for raw_stage in spec.split(","):
+        parts = raw_stage.strip().split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"Unsupported RUL curriculum stage {raw_stage!r}. Expected 'progress:min:max'."
+            )
+        progress = float(parts[0])
+        min_rul = float(parts[1])
+        max_rul = None if parts[2].lower() in {"none", "inf", "open"} else float(parts[2])
+        if not 0.0 <= progress <= 1.0:
+            raise ValueError(f"Curriculum progress must be in [0, 1], got {progress}.")
+        if max_rul is not None and max_rul < min_rul:
+            raise ValueError(f"Curriculum max RUL {max_rul} is lower than min RUL {min_rul}.")
+        stages.append((progress, min_rul, max_rul))
+
+    stages.sort(key=lambda item: item[0])
+    if not stages or stages[0][0] != 0.0:
+        raise ValueError("RUL curriculum must start at progress 0.")
+    return stages
+
+
 def make_aircraft_env_factory(
     *,
     model_path: str,
     min_initial_rul: float,
+    initial_rul_max: float | None,
     maintenance_resets_health: bool,
     eligible_units: list[int] | None,
 ) -> Callable[[], AircraftEnv]:
@@ -155,6 +192,7 @@ def make_aircraft_env_factory(
             features_list=FEATURES,
             eligible_units=eligible_units,
             min_initial_rul=min_initial_rul,
+            initial_rul_max=initial_rul_max,
             maintenance_resets_health=maintenance_resets_health,
         )
 
@@ -178,6 +216,9 @@ def load_or_train_ppo(args: argparse.Namespace):
     print(f"🏷️ Training run name: {run_name}")
     print(f"🛩️ Eligible training engine units: {args.eligible_units}")
 
+    rul_curriculum = parse_rul_curriculum(args.rul_curriculum_schedule)
+    print(f"RUL curriculum: {rul_curriculum}")
+
     repo_ppo_path = models_dir / f"ppo_aircraft_{run_name}"
     stats_path = models_dir / f"ppo_aircraft_{run_name}_vec_normalize.pkl"
     best_model_dir = models_dir / f"best_ppo_{run_name}"
@@ -186,6 +227,7 @@ def load_or_train_ppo(args: argparse.Namespace):
     make_env = make_aircraft_env_factory(
         model_path=str(model_path),
         min_initial_rul=args.min_initial_rul,
+        initial_rul_max=args.initial_rul_max,
         maintenance_resets_health=args.maintenance_resets_health,
         eligible_units=args.eligible_units,
     )
@@ -303,6 +345,8 @@ def load_or_train_ppo(args: argparse.Namespace):
             "diag_n_episodes": args.diag_n_episodes,
             "eval_seed": args.eval_seed,
             "min_initial_rul": args.min_initial_rul,
+            "initial_rul_max": args.initial_rul_max,
+            "rul_curriculum_schedule": args.rul_curriculum_schedule,
             "maintenance_resets_health": args.maintenance_resets_health,
             "eligible_units": args.eligible_units,
             "model_path": str(model_path),
@@ -353,6 +397,16 @@ def load_or_train_ppo(args: argparse.Namespace):
             if ent_coef_schedule is not None
             else None
         )
+        rul_curriculum_cb = (
+            RulCurriculumCallback(
+                schedule=rul_curriculum,
+                total_timesteps=args.total_timesteps,
+                eval_env=eval_env,
+                verbose=1,
+            )
+            if rul_curriculum is not None
+            else None
+        )
         mlflow_cb = MLflowLoggingCallback(verbose=1)
 
         callbacks = [
@@ -361,6 +415,8 @@ def load_or_train_ppo(args: argparse.Namespace):
             eval_diag_det_cb,
             eval_diag_stoch_cb,
         ]
+        if rul_curriculum_cb is not None:
+            callbacks.append(rul_curriculum_cb)
         if ent_coef_schedule_cb is not None:
             callbacks.append(ent_coef_schedule_cb)
         callbacks.append(mlflow_cb)
@@ -395,7 +451,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-train", action="store_true", help="Train even if a model with the same run name already exists.")
     parser.add_argument("--check-env", action="store_true", help="Run stable-baselines3 check_env before training.")
 
-    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_500_000)
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument(
@@ -405,7 +461,7 @@ def parse_args() -> argparse.Namespace:
         help="Learning-rate schedule spec, e.g. 'linear:3e-4:3e-5'. Use 'none' for fixed --learning-rate.",
     )
     parser.add_argument("--n-steps", type=int, default=2048)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--n-epochs", type=int, default=10)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -441,6 +497,21 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--min-initial-rul", type=float, default=120.0)
     parser.add_argument(
+        "--initial-rul-max",
+        type=float,
+        default=None,
+        help="Optional maximum initial RUL. Use with --rul-curriculum-schedule for banded sampling.",
+    )
+    parser.add_argument(
+        "--rul-curriculum-schedule",
+        type=str,
+        default=DEFAULT_RUL_CURRICULUM,
+        help=(
+            "Initial-RUL curriculum as 'progress:min:max' stages. "
+            "Use 'none' to keep a fixed --min-initial-rul/--initial-rul-max range."
+        ),
+    )
+    parser.add_argument(
         "--no-maintenance-reset-health",
         dest="maintenance_resets_health",
         action="store_false",
@@ -454,7 +525,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TRAIN_ELIGIBLE_UNITS,
         help=(
             "Engine unit IDs to sample from before min_initial_rul filtering. "
-            f"Default uses a fast curriculum subset: {DEFAULT_TRAIN_ELIGIBLE_UNITS}. "
+            "Default uses all units so the RUL curriculum can span low/high-RUL bands. "
             "Pass no values after the flag to use all units."
         ),
     )
