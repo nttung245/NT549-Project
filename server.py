@@ -40,6 +40,10 @@ lstm_model = None
 ppo_model = None
 vec_normalize = None
 
+# Match the latest trained PPO run used by the stable demo.
+DEFAULT_PPO_RUN_NAME = os.environ.get("PPO_RUN_NAME", "PPO_Run_20260516_143227")
+DEFAULT_ELIGIBLE_UNITS = [14, 62, 3]
+
 @app.on_event("startup")
 async def startup_event():
     global env, lstm_model
@@ -64,17 +68,22 @@ async def startup_event():
         model_path=model_path,
         scaler=scaler,
         sensor_list=KEY_SENSORS,
-        features_list=FEATURES
+        features_list=FEATURES,
+        eligible_units=DEFAULT_ELIGIBLE_UNITS,
     )
     
     obs, info = env.reset()
     
     # --- Load RL Agent ---
-    ppo_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft')
-    stats_path = os.path.join(PROJECT_ROOT, 'models', 'ppo_aircraft_vec_normalize.pkl')
+    best_ppo_dir = os.path.join(PROJECT_ROOT, "models", f"best_ppo_{DEFAULT_PPO_RUN_NAME}")
+    ppo_path = os.path.join(best_ppo_dir, "best_model.zip")
+    stats_path = os.path.join(best_ppo_dir, "vec_normalize.pkl")
+    print(f"🔎 PPO run for UI: {DEFAULT_PPO_RUN_NAME}")
+    print(f"🔎 PPO model path: {ppo_path}")
+    print(f"🔎 VecNormalize path: {stats_path}")
     
     global ppo_model, vec_normalize
-    if os.path.exists(ppo_path + ".zip") and os.path.exists(stats_path):
+    if os.path.exists(ppo_path) and os.path.exists(stats_path):
         try:
             # We need a DummyVecEnv to wrap for VecNormalize
             def make_dummy_env():
@@ -94,6 +103,7 @@ async def startup_event():
         except Exception as e:
             print(f"❌ Error loading PPO model: {e}")
             ppo_model = None
+            vec_normalize = None
     else:
         print("⚠️ Warning: PPO model or stats not found. Falling back to heuristic policy.")
 
