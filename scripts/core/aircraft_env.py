@@ -18,19 +18,20 @@ import pandas as pd
 
 from scripts.core.digital_twin import AircraftDigitalTwin
 from scripts.data.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
-from scripts.core.weather import WeatherEffect, WeatherMap
+from scripts.core.weather import WeatherEffect, WeatherMap, WeatherZone
 
 
 class AircraftEnv(gym.Env):
     """
     Gymnasium environment for aircraft predictive maintenance using PPO.
 
-    Observation Space (16-dim):
+    Observation Space (19-dim):
         [Altitude, Fuel, Effective_RUL,
          SignedDist_Airport_1..6 (sorted by position, negative=behind),
          Dist_to_Destination, In_Approach_Zone,
          Wind_Strength, Weather_Fuel_Multiplier, Weather_RUL_Multiplier,
-         Next_Hazard_Distance, Next_Hazard_Type]
+         Next_Hazard_Distance, Next_Hazard_Type,
+         Next_Hazard_Alt_Min, Next_Hazard_Alt_Max, Next_Hazard_Speed_Multiplier]
 
         Airport distances are SIGNED relative to current position:
             Positive  → airport is still ahead
@@ -61,12 +62,28 @@ class AircraftEnv(gym.Env):
     NUM_SUB_AIRPORTS = 6      # Số sân bay phụ trên đường bay
     FUEL_CAPACITY = 250.0     # Dung tích nhiên liệu tối đa
 
+    # ── Landing-softening constants ─────────────────────────────
+    # Keep the 3-action interface but prevent one slightly early DESCEND from
+    # immediately becoming a terminal FIELD_CRASH. A near-target touchdown can
+    # enter a low-altitude flare/hold state and try to align with the runway on
+    # the next steps; far-away touchdowns still terminate with a proportional
+    # penalty.
+    FLARE_ALTITUDE = 250.0
+    SOFT_LANDING_THRESHOLD = 850.0
+    LOW_ALTITUDE_THRESHOLD = 650.0
+    APPROACH_PROFILE_DISTANCE = 2200.0
+    MIN_FIELD_CRASH_PENALTY = 20.0
+    MAX_FIELD_CRASH_PENALTY = 60.0
+
     def __init__(self, fleet_data: pd.DataFrame, model_path: str, scaler,
                  sensor_list: list[str] | None = None,
                  features_list: list[str] | None = None,
                  eligible_units: list[int] | None = None,
                  min_initial_rul: float = 120.0,
-                 maintenance_resets_health: bool = True):
+                 initial_rul_max: float | None = None,
+                 maintenance_resets_health: bool = True,
+                 airport_noise: float = 200.0,
+                 enable_weather: bool = True):
         """
         Args:
             fleet_data: DataFrame huấn luyện/đánh giá (đã rolling + có cột RUL).
@@ -77,8 +94,13 @@ class AircraftEnv(gym.Env):
             eligible_units: Optional explicit engine IDs to sample from.
             min_initial_rul: Minimum RUL at the initial LSTM window. Units below
                 this threshold are excluded to avoid impossible starting episodes.
+            initial_rul_max: Optional maximum RUL at the initial LSTM window for
+                curriculum bands. None keeps only the minimum gate.
             maintenance_resets_health: If True, a successful intermediate
                 maintenance landing refuels and swaps/resets the engine health.
+            airport_noise: Maximum random offset around each base sub-airport.
+                Curriculum can start this at 0 and gradually restore ±200.
+            enable_weather: If False, use clear weather for ablation runs.
         """
         super(AircraftEnv, self).__init__()
 
@@ -112,13 +134,14 @@ class AircraftEnv(gym.Env):
         # Action 2: CLIMB (Altitude +1000/cycle)
         self.action_space = spaces.Discrete(3)
 
-        # Observation Space 16-dim:
+        # Observation Space 19-dim:
         # [Altitude, Fuel, Effective_RUL,
         #  SignedDist_AP1..AP6 (sorted by position; âm=đã qua, dương=phía trước),
         #  Dist_to_Destination,
         #  In_Approach_Zone (1 nếu đang trong APPROACH_DISTANCE của sân bay tiếp theo),
         #  Wind_Strength, Weather_Fuel_Multiplier, Weather_RUL_Multiplier,
-        #  Next_Hazard_Distance, Next_Hazard_Type]
+        #  Next_Hazard_Distance, Next_Hazard_Type,
+        #  Next_Hazard_Alt_Min, Next_Hazard_Alt_Max, Next_Hazard_Speed_Multiplier]
         #
         # Ghi chú: Velocity được loại bỏ vì nó luôn cố định theo action (CRUISE/DESCEND/CLIMB).
         # Agent có thể suy ra Velocity từ action nó đã chọn.
@@ -131,14 +154,14 @@ class AircraftEnv(gym.Env):
             [0.0, 0.0, 0.0] +                         # Altitude, Fuel, Effective_RUL
             [-self.TOTAL_DISTANCE] * n_ap +            # SignedDist_AP1..6 (có thể âm)
             [0.0, 0.0] +                               # Dist_Destination, In_Approach_Zone
-            [-1.0, 0.7, 1.0, 0.0, 0.0],               # Weather features
+            [-1.0, 0.7, 1.0, 0.0, 0.0, 0.0, 0.0, 0.7], # Weather features
             dtype=np.float32
         )
         high = np.array(
             [self.MAX_ALTITUDE, self.FUEL_CAPACITY, 300.0] +
             [self.TOTAL_DISTANCE] * n_ap +
             [self.TOTAL_DISTANCE, 1.0] +               # Dist_Destination, In_Approach_Zone
-            [1.0, 2.0, 1.5, self.TOTAL_DISTANCE, 4.0], # Weather features
+            [1.0, 2.0, 1.5, self.TOTAL_DISTANCE, 4.0, self.MAX_ALTITUDE, self.MAX_ALTITUDE, 1.15],
             dtype=np.float32
         )
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
@@ -146,7 +169,10 @@ class AircraftEnv(gym.Env):
         # ── Internal state ──────────────────────────────────────
         self.twin = None
         self.min_initial_rul = float(min_initial_rul)
+        self.initial_rul_max = float(initial_rul_max) if initial_rul_max is not None else None
         self.maintenance_resets_health = bool(maintenance_resets_health)
+        self.airport_noise = float(max(0.0, airport_noise))
+        self.enable_weather = bool(enable_weather)
         self.unit_rul_map: dict[int, np.ndarray] = {}
         self.unit_initial_rul_map: dict[int, float] = {}
         self.unit_data_map: dict[int, np.ndarray] = {}
@@ -166,12 +192,13 @@ class AircraftEnv(gym.Env):
                 )
 
         all_units = sorted(self.unit_data_map.keys())
-        candidate_units = [int(unit_id) for unit_id in eligible_units] if eligible_units is not None else all_units
-        self.engine_units = self._filter_engine_units(candidate_units)
+        self.base_candidate_units = [int(unit_id) for unit_id in eligible_units] if eligible_units is not None else all_units
+        self.engine_units = self._filter_engine_units(self.base_candidate_units)
         if not self.engine_units:
             raise ValueError(
-                f"No eligible engine units after filtering with min_initial_rul={self.min_initial_rul}. "
-                "Lower min_initial_rul or pass explicit eligible_units."
+                "No eligible engine units after filtering with "
+                f"min_initial_rul={self.min_initial_rul}, initial_rul_max={self.initial_rul_max}. "
+                "Loosen the RUL band or pass a broader eligible_units list."
             )
       
         self.current_unit_idx = 0
@@ -204,28 +231,36 @@ class AircraftEnv(gym.Env):
         self.current_step = 0
         self.dist_since_last_maintenance = 0.0  # Khoảng cách đã bay kể từ lần bảo trì gần nhất
 
-        # Chia lộ trình thành các phân đoạn, đặt ngẫu nhiên sân bay (giới hạn độ lệch để tránh khoảng cách quá lớn)
+        # Chia lộ trình thành các phân đoạn. Airport-noise curriculum có thể
+        # bắt đầu ở 0 để agent học kỹ năng hạ cánh cơ bản trước, sau đó tăng dần
+        # về ±200 để học robustness.
         base_points = [2857.0, 5714.0, 8571.0, 11428.0, 14285.0, 17142.0]
         self.sub_airports = []
         for base in base_points:
-            # Noise ngẫu nhiên từ -200 đến +200 xung quanh mốc
-            noise = self.np_random.uniform(-200.0, 200.0)
+            noise = self.np_random.uniform(-self.airport_noise, self.airport_noise)
             self.sub_airports.append(base + noise)
         
         # Sort theo vị trí để observation index nhất quán
         self.sub_airports.sort()
 
-        # Tạo các vùng thời tiết tĩnh cho episode hiện tại.
-        # Không drift và không curriculum để giữ scope đồ án cơ bản, dễ debug.
-        self.weather_map = WeatherMap.generate(
-            route_length=self.TOTAL_DISTANCE,
-            max_altitude=self.MAX_ALTITUDE,
-            rng=self.np_random,
-        )
+        # Tạo các vùng thời tiết tĩnh cho episode hiện tại. Ablation có thể tắt
+        # weather để kiểm tra riêng landing/RUL trước khi thêm nhiễu môi trường.
+        if self.enable_weather:
+            self.weather_map = WeatherMap.generate(
+                route_length=self.TOTAL_DISTANCE,
+                max_altitude=self.MAX_ALTITUDE,
+                rng=self.np_random,
+            )
+        else:
+            self.weather_map = WeatherMap()
         self.weather_rul_damage = 0.0
 
         obs = self._get_obs()
-        return obs, {"weather_zones": self.weather_map.to_dicts()}
+        return obs, {
+            "weather_zones": self.weather_map.to_dicts(),
+            "airport_noise": float(self.airport_noise),
+            "weather_enabled": bool(self.enable_weather),
+        }
 
     # ================================================================
     # Step
@@ -334,7 +369,7 @@ class AircraftEnv(gym.Env):
                 reward_components["weather_rul_damage"] = -extra_rul_damage
         effective_rul = max(0.0, predicted_rul - self.weather_rul_damage)
 
-        weather_reward = self._weather_reward(weather)
+        weather_reward = self._weather_reward(weather, action_int)
         if weather_reward != 0.0:
             reward += weather_reward
             reward_components["weather"] = weather_reward
@@ -353,6 +388,14 @@ class AircraftEnv(gym.Env):
                 next_ap = min(ahead_airports)
                 dist_to_next_target = next_ap - current_pos
 
+        next_hazard_zone = self.weather_map.get_next_zone(current_pos)
+        maintenance_pressure = self._maintenance_need_pressure(
+            effective_rul=effective_rul,
+            fuel=float(self.twin.fuel),
+            current_pos=float(current_pos),
+            next_hazard_zone=next_hazard_zone,
+        )
+
         # ── Approach Guidance Reward ───────────────────────────────
         # Keep this as a small shaping signal instead of a strong per-step bonus.
         # A healthy aircraft can pass an airport normally; DESCEND guidance grows
@@ -362,21 +405,64 @@ class AircraftEnv(gym.Env):
         descent_steps_remaining = int(np.ceil(altitude_after_action / self.DESCEND_RATE)) if altitude_after_action > 0 else 0
         descent_distance_needed = descent_steps_remaining * self.V_DESCEND
         landing_feasible_now = dist_to_next_target <= (descent_distance_needed + self.LANDING_THRESHOLD)
+        nearest_landing_distance = min(
+            dist_nearest_abs,
+            max(0.0, self.distance_to_destination),
+        )
+
+        # Dense landing-profile shaping: only active when a landing/maintenance
+        # target is actually relevant. This gives PPO a smooth signal before the
+        # hard touchdown check instead of relying only on sparse ARRIVED/CRASHED.
+        target_need = max(
+            maintenance_pressure,
+            1.0 if self.distance_to_destination <= self.APPROACH_PROFILE_DISTANCE else 0.0,
+        )
+        ideal_landing_altitude = altitude_after_action
+        landing_profile_error = 0.0
+        if was_in_air and target_need > 0.05 and dist_to_next_target <= self.APPROACH_PROFILE_DISTANCE:
+            profile_span = max(1.0, self.APPROACH_PROFILE_DISTANCE - self.LANDING_THRESHOLD)
+            ideal_landing_altitude = float(np.clip(
+                max(0.0, dist_to_next_target - self.LANDING_THRESHOLD) / profile_span * self.MAX_ALTITUDE,
+                0.0,
+                self.MAX_ALTITUDE,
+            ))
+            landing_profile_error = abs(altitude_after_action - ideal_landing_altitude) / self.MAX_ALTITUDE
+            profile_reward = 0.05 * target_need * max(0.0, 1.0 - landing_profile_error)
+            reward += profile_reward
+            reward_components["landing_profile"] = profile_reward
+
+            if action_int == 1 and altitude_after_action > ideal_landing_altitude + self.DESCEND_RATE:
+                descent_profile_reward = 0.04 * target_need
+                reward += descent_profile_reward
+                reward_components["descent_profile"] = descent_profile_reward
+            elif action_int == 2 and altitude_after_action > ideal_landing_altitude + self.DESCEND_RATE:
+                climb_against_profile_penalty = -0.04 * target_need
+                reward += climb_against_profile_penalty
+                reward_components["climb_against_profile"] = climb_against_profile_penalty
+
+        if (
+            was_in_air
+            and altitude_after_action <= self.LOW_ALTITUDE_THRESHOLD
+            and nearest_landing_distance > self.SOFT_LANDING_THRESHOLD
+        ):
+            low_altitude_far_penalty = -0.12 * min(
+                1.0,
+                (nearest_landing_distance - self.SOFT_LANDING_THRESHOLD) / self.APPROACH_PROFILE_DISTANCE,
+            )
+            reward += low_altitude_far_penalty
+            reward_components["low_altitude_far"] = low_altitude_far_penalty
 
         if was_in_air and in_approach_zone:
-            rul_pressure = float(np.clip((80.0 - effective_rul) / 80.0, 0.0, 1.0))
-            fuel_pressure = float(np.clip((60.0 - self.twin.fuel) / 60.0, 0.0, 1.0))
-            maintenance_pressure = max(rul_pressure, fuel_pressure)
-
             if action_int == 1 and landing_feasible_now:
-                # Tiny baseline teaches landing timing; maintenance pressure provides
-                # the larger signal only when landing is strategically justified.
                 timing_quality = max(0.0, 1.0 - dist_to_next_target / self.APPROACH_DISTANCE)
-                base_guidance = 0.03 * timing_quality
-                need_guidance = 0.22 * maintenance_pressure * timing_quality
-                approach_reward = base_guidance + need_guidance
-                reward += approach_reward
-                reward_components["approach"] = approach_reward
+                approach_reward = 0.25 * maintenance_pressure * timing_quality
+                if approach_reward > 0.0:
+                    reward += approach_reward
+                    reward_components["approach"] = approach_reward
+                elif maintenance_pressure < 0.10:
+                    unnecessary_descent_penalty = -0.03 * timing_quality
+                    reward += unnecessary_descent_penalty
+                    reward_components["unnecessary_descent"] = unnecessary_descent_penalty
             elif action_int == 1 and not landing_feasible_now:
                 early_descent_penalty = -0.08
                 reward += early_descent_penalty
@@ -388,7 +474,7 @@ class AircraftEnv(gym.Env):
                 reward += late_climb_penalty
                 reward_components["late_climb"] = late_climb_penalty
 
-        # 6. KIỂM TRA ĐÁP ĐẤT (Chỉ kiểm tra nếu vừa đáp từ trên không xuống)
+        # 6. KIỂM TRA ĐÁP ĐẤT / AUTO-FLARE
         if was_in_air and self.twin.altitude <= 0:
             # Chỉ cho phép đáp nếu đã bay đủ xa (tránh farm điểm tại chỗ)
             valid_flight = self.dist_since_last_maintenance >= 1000.0
@@ -407,20 +493,26 @@ class AircraftEnv(gym.Env):
                     # Thưởng tỷ lệ với quãng đường đã bay từ lần bảo trì trước
                     # → Ngăn Agent "farm" bằng cách climb/descend tại chỗ (chỉ ~35m)
                     # → Khuyến khích bay đủ xa rồi mới bảo trì
-                    progress_bonus = min(self.dist_since_last_maintenance / 100.0, 30.0)  # 0 đến +30
-                    rul_bonus = max(0.0, (80.0 - effective_rul) * 0.3)       # 0 đến +24 (khi RUL < 80)
-                    fuel_bonus = max(0.0, (1.0 - self.twin.fuel / self.FUEL_CAPACITY) * 15.0)  # 0 đến +15
-                    landing_accuracy_bonus = max(0.0, (1.0 - dist_nearest_abs / self.LANDING_THRESHOLD) * 10.0)
-                    base_maintenance_reward = progress_bonus + rul_bonus + fuel_bonus + landing_accuracy_bonus  # Luôn >= 0
-                    maintenance_reward = base_maintenance_reward
-                    if weather.zone_type == "turbulence":
-                        # Turbulence makes a valid maintenance landing rougher by halving
-                        # the bonus. Record the lost bonus separately for diagnostics;
-                        # do not add it again as a second penalty.
-                        maintenance_reward *= 0.5
-                        reward_components["rough_landing_bonus_loss"] = -(base_maintenance_reward - maintenance_reward)
-                    reward += maintenance_reward
-                    reward_components["maintenance"] = maintenance_reward
+                    landing_accuracy_bonus = max(0.0, (1.0 - dist_nearest_abs / self.LANDING_THRESHOLD) * 5.0)
+                    progress_bonus = min(self.dist_since_last_maintenance / 500.0, 6.0)
+                    if maintenance_pressure < 0.15:
+                        unnecessary_penalty = -12.0 * (1.0 - maintenance_pressure)
+                        reward += unnecessary_penalty
+                        reward_components["unnecessary_maintenance"] = unnecessary_penalty
+                        maintenance_reward = 0.0
+                    else:
+                        maintenance_reward = (
+                            4.0
+                            + 22.0 * maintenance_pressure
+                            + progress_bonus
+                            + landing_accuracy_bonus
+                        )
+                        if weather.zone_type == "turbulence":
+                            rough_landing_loss = maintenance_reward * 0.5
+                            maintenance_reward -= rough_landing_loss
+                            reward_components["rough_landing_bonus_loss"] = -rough_landing_loss
+                        reward += maintenance_reward
+                        reward_components["maintenance"] = maintenance_reward
             
                     # Snap vị trí về sân bay phụ đã hạ cánh
                     landed_ap = min(self.sub_airports, key=lambda p: abs(p - current_pos))
@@ -452,12 +544,42 @@ class AircraftEnv(gym.Env):
                     # Reset maintenance distance counter
                     self.dist_since_last_maintenance = 0.0
             else:
-                # Rớt máy bay (Hạ cánh giữa đường)
-                field_crash_penalty = -60.0
-                reward += field_crash_penalty
-                reward_components["field_crash"] = field_crash_penalty
-                done = True
-                info['event'] = "FIELD_CRASH"
+                # Soft auto-flare: if the agent touched down slightly outside the
+                # hard runway threshold, keep it alive near ground with a small
+                # distance-scaled penalty. This preserves the 3-action interface
+                # while making landing learnable from near misses.
+                can_auto_flare = (
+                    action_int == 1
+                    and valid_flight
+                    and nearest_landing_distance <= self.SOFT_LANDING_THRESHOLD
+                )
+                if can_auto_flare:
+                    flare_penalty = -0.40 * (nearest_landing_distance / self.SOFT_LANDING_THRESHOLD)
+                    reward += flare_penalty
+                    reward_components["auto_flare"] = flare_penalty
+                    self.twin.altitude = self.FLARE_ALTITUDE
+                    self.twin.velocity = max(1.0, self.V_DESCEND * 0.5)
+                    self.flight_phase = "FLARING"
+                    done = False
+                    info['event'] = "FLARE_HOLD"
+                    info['soft_landing_distance'] = float(nearest_landing_distance)
+                else:
+                    # Far-away field crashes remain terminal, but the penalty is
+                    # proportional to how badly the runway was missed instead of
+                    # always applying the maximum penalty to near misses.
+                    normalized_miss = min(
+                        1.0,
+                        nearest_landing_distance / max(1.0, self.SOFT_LANDING_THRESHOLD),
+                    )
+                    field_crash_penalty = -(
+                        self.MIN_FIELD_CRASH_PENALTY
+                        + (self.MAX_FIELD_CRASH_PENALTY - self.MIN_FIELD_CRASH_PENALTY) * normalized_miss
+                    )
+                    reward += field_crash_penalty
+                    reward_components["field_crash"] = field_crash_penalty
+                    done = True
+                    info['event'] = "FIELD_CRASH"
+                    info['soft_field_crash_distance'] = float(nearest_landing_distance)
 
         # 7. KIỂM TRA TỬ VONG (Hết Nhiên Liệu hoặc RUL = 0)
         # Chỉ kiểm tra nếu chưa hoàn thành (ví dụ đã hạ cánh thành công).
@@ -496,8 +618,14 @@ class AircraftEnv(gym.Env):
             "distance_to_destination": float(self.distance_to_destination),
             "dist_to_next_target": float(dist_to_next_target),
             "dist_nearest_airport": float(dist_nearest_abs),
+            "maintenance_pressure": float(maintenance_pressure),
             "in_approach_zone": bool(in_approach_zone),
             "landing_feasible_now": bool(landing_feasible_now),
+            "nearest_landing_distance": float(nearest_landing_distance),
+            "ideal_landing_altitude": float(ideal_landing_altitude),
+            "landing_profile_error": float(landing_profile_error),
+            "airport_noise": float(self.airport_noise),
+            "weather_enabled": bool(self.enable_weather),
             "descent_steps_remaining": int(descent_steps_remaining),
             "descent_distance_needed": float(descent_distance_needed),
             "flight_phase": self.flight_phase,
@@ -519,13 +647,14 @@ class AircraftEnv(gym.Env):
     # ================================================================
     def _get_obs(self) -> np.ndarray:
         """
-        Trả về observation vector 16 chiều:
+        Trả về observation vector 19 chiều:
         [Altitude, Fuel, Effective_RUL,
          SignedDist_AP1..AP6 (sorted, âm=đã qua, dương=phía trước),
          Dist_to_Destination,
          In_Approach_Zone,
          Wind_Strength, Weather_Fuel_Multiplier, Weather_RUL_Multiplier,
-         Next_Hazard_Distance, Next_Hazard_Type]
+         Next_Hazard_Distance, Next_Hazard_Type,
+         Next_Hazard_Alt_Min, Next_Hazard_Alt_Max, Next_Hazard_Speed_Multiplier]
 
         Weather features giúp agent học chiến lược leo/hạ độ cao để né storm,
         headwind, turbulence hoặc tận dụng tailwind mà không đổi action space.
@@ -558,9 +687,15 @@ class AircraftEnv(gym.Env):
         if next_zone is None:
             next_hazard_distance = self.TOTAL_DISTANCE
             next_hazard_type = 0.0
+            next_hazard_alt_min = 0.0
+            next_hazard_alt_max = self.MAX_ALTITUDE
+            next_hazard_speed_multiplier = 1.0
         else:
             next_hazard_distance = next_zone.start - current_pos
             next_hazard_type = float(next_zone.type_id)
+            next_hazard_alt_min = float(next_zone.alt_min)
+            next_hazard_alt_max = float(next_zone.alt_max)
+            next_hazard_speed_multiplier = float(next_zone.speed_multiplier)
 
         return np.array([
             twin.altitude,
@@ -574,12 +709,15 @@ class AircraftEnv(gym.Env):
             weather.rul_multiplier,
             next_hazard_distance,
             next_hazard_type,
+            next_hazard_alt_min,
+            next_hazard_alt_max,
+            next_hazard_speed_multiplier,
         ], dtype=np.float32)
 
     def _get_current_weather(self, current_pos: float | None = None,
                              altitude: float | None = None) -> WeatherEffect:
         """Return the static weather effect at the current route position."""
-        if self.twin is None:
+        if self.twin is None or not self.enable_weather:
             return WeatherEffect()
         if current_pos is None:
             current_pos = self.TOTAL_DISTANCE - self.distance_to_destination
@@ -587,17 +725,71 @@ class AircraftEnv(gym.Env):
             altitude = float(self.twin.altitude)
         return self.weather_map.get_weather_at(float(current_pos), float(altitude))
 
+    def _route_targets_ahead(self, current_pos: float) -> list[float]:
+        """Return remaining sub-airports plus destination, sorted by route position."""
+        ahead_airports = [float(ap) for ap in self.sub_airports if ap > current_pos]
+        return ahead_airports + [self.TOTAL_DISTANCE]
+
+    def _estimated_cruise_range(self, fuel: float, altitude: float) -> float:
+        """Approximate remaining cruise range with a reserve for bad weather and descent."""
+        altitude_ratio = float(np.clip(altitude / self.MAX_ALTITUDE, 0.0, 1.0))
+        cruise_speed = 25.0 + altitude_ratio * 15.0
+        fuel_rate = 0.5 - altitude_ratio * 0.2
+        return max(0.0, fuel) * cruise_speed / max(0.05, fuel_rate) * 0.80
+
+    def _maintenance_need_pressure(
+        self,
+        *,
+        effective_rul: float,
+        fuel: float,
+        current_pos: float,
+        next_hazard_zone: WeatherZone | None,
+    ) -> float:
+        """
+        Estimate whether the next airport is strategically needed.
+
+        Pressure is near zero when the aircraft can skip the next airport and
+        still reach the following airport/destination with fuel and RUL reserve.
+        It rises when RUL/fuel reserves are thin or a severe hazard is imminent.
+        """
+        targets = self._route_targets_ahead(current_pos)
+        if not targets:
+            return 0.0
+
+        skip_target = targets[1] if len(targets) >= 2 else targets[0]
+        skip_distance = max(0.0, skip_target - current_pos)
+
+        twin_altitude = float(self.twin.altitude if self.twin is not None else 2000.0)
+        range_after_reserve = self._estimated_cruise_range(fuel, twin_altitude)
+        fuel_pressure = float(np.clip((skip_distance - range_after_reserve) / 1800.0, 0.0, 1.0))
+
+        nominal_speed = 25.0 + float(np.clip(twin_altitude / self.MAX_ALTITUDE, 0.0, 1.0)) * 15.0
+        cycles_needed_to_skip = skip_distance / max(1.0, nominal_speed)
+        rul_pressure = float(np.clip((cycles_needed_to_skip + 20.0 - effective_rul) / 70.0, 0.0, 1.0))
+
+        hazard_pressure = 0.0
+        if next_hazard_zone is not None:
+            hazard_distance = max(0.0, float(next_hazard_zone.start - current_pos))
+            first_target_distance = max(0.0, targets[0] - current_pos)
+            if hazard_distance <= first_target_distance + 700.0:
+                if next_hazard_zone.zone_type == "storm":
+                    hazard_pressure = 0.45
+                elif next_hazard_zone.zone_type == "turbulence":
+                    hazard_pressure = 0.30
+
+        return float(np.clip(max(fuel_pressure, rul_pressure, hazard_pressure), 0.0, 1.0))
+
     @staticmethod
-    def _weather_reward(weather: WeatherEffect) -> float:
+    def _weather_reward(weather: WeatherEffect, action_int: int) -> float:
         """Small shaping term for readable weather-aware behavior."""
         if weather.zone_type == "tailwind":
-            return 0.02
+            return 0.08 if action_int == 0 else 0.03
         if weather.zone_type == "headwind":
-            return -0.02
-        if weather.zone_type == "storm":
-            return -0.05
-        if weather.zone_type == "turbulence":
             return -0.03
+        if weather.zone_type == "storm":
+            return -0.08
+        if weather.zone_type == "turbulence":
+            return -0.05
         return 0.0
 
     def _dist_to_nearest_airport(self) -> float:
@@ -619,6 +811,33 @@ class AircraftEnv(gym.Env):
             return row
         return None  # Hết dữ liệu cho engine hiện tại
 
+    def set_initial_rul_range(
+        self,
+        min_initial_rul: float,
+        initial_rul_max: float | None = None,
+    ) -> None:
+        """Update future reset sampling to a new initial-RUL curriculum band."""
+        self.min_initial_rul = float(min_initial_rul)
+        self.initial_rul_max = float(initial_rul_max) if initial_rul_max is not None else None
+        engine_units = self._filter_engine_units(self.base_candidate_units)
+        if not engine_units:
+            raise ValueError(
+                "No eligible engine units after curriculum update with "
+                f"min_initial_rul={self.min_initial_rul}, initial_rul_max={self.initial_rul_max}."
+            )
+        self.engine_units = engine_units
+
+    def set_airport_noise(self, airport_noise: float) -> None:
+        """Update future reset airport-position randomization amplitude."""
+        self.airport_noise = float(max(0.0, airport_noise))
+
+    def set_weather_enabled(self, enable_weather: bool) -> None:
+        """Enable or disable weather for future resets/steps."""
+        self.enable_weather = bool(enable_weather)
+        if not self.enable_weather:
+            self.weather_map = WeatherMap()
+            self.weather_rul_damage = 0.0
+
     def _filter_engine_units(self, candidate_units: list[int]) -> list[int]:
         """Return units whose initial window has enough true RUL for a fair start."""
         eligible: list[int] = []
@@ -633,6 +852,10 @@ class AircraftEnv(gym.Env):
             init_idx = min(SEQUENCE_LENGTH, len(rul_values)) - 1
             initial_rul = float(rul_values[max(init_idx, 0)])
             self.unit_initial_rul_map[unit_id] = initial_rul
+            if initial_rul < self.min_initial_rul:
+                continue
+            if self.initial_rul_max is not None and initial_rul > self.initial_rul_max:
+                continue
             if initial_rul >= self.min_initial_rul:
                 eligible.append(unit_id)
         return eligible
