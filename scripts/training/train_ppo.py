@@ -38,6 +38,7 @@ from scripts.data.data_processor import FEATURES, KEY_SENSORS, prepare_data
 from scripts.models.lstm_model import create_sequences, train_model
 from scripts.core.aircraft_env import AircraftEnv
 from scripts.training.rl_callbacks import (
+    AirportNoiseCurriculumCallback,
     EntCoefScheduleCallback,
     EvalDiagnosticsCallback,
     FixedSeedEvalCallback,
@@ -63,7 +64,63 @@ except ImportError:
 # By default, train across all engines and let the RUL curriculum narrow the
 # sampled band. Passing --eligible-units still supports targeted experiments.
 DEFAULT_TRAIN_ELIGIBLE_UNITS = None
-DEFAULT_RUL_CURRICULUM = "0:140:170,0.3:170:260,0.65:120:335"
+# Slower/easier default curriculum: start with healthy engines, widen to hard
+# low-RUL cases only late in training.
+DEFAULT_RUL_CURRICULUM = "0:170:260,0.5:140:260,0.8:120:335"
+DEFAULT_AIRPORT_NOISE = 0.0
+DEFAULT_AIRPORT_NOISE_CURRICULUM = "0:0,0.35:50,0.65:100,0.85:200"
+
+ABLATION_PRESETS: dict[str, dict[str, object]] = {
+    # Use parser defaults and direct CLI values without preset overrides.
+    "custom": {},
+    # Simplest learnable environment: fixed airport layout, no weather, high RUL.
+    "simple": {
+        "enable_weather": False,
+        "airport_noise": 0.0,
+        "airport_noise_curriculum_schedule": "none",
+        "rul_curriculum_schedule": "none",
+        "min_initial_rul": 170.0,
+        "initial_rul_max": 260.0,
+    },
+    # Add airport-position randomness gradually, but keep RUL/weather easy.
+    "airport": {
+        "enable_weather": False,
+        "airport_noise": 0.0,
+        "airport_noise_curriculum_schedule": DEFAULT_AIRPORT_NOISE_CURRICULUM,
+        "rul_curriculum_schedule": "none",
+        "min_initial_rul": 170.0,
+        "initial_rul_max": 260.0,
+    },
+    # Add the slower RUL curriculum after airport randomness is learnable.
+    "rul": {
+        "enable_weather": False,
+        "airport_noise": 0.0,
+        "airport_noise_curriculum_schedule": DEFAULT_AIRPORT_NOISE_CURRICULUM,
+        "rul_curriculum_schedule": DEFAULT_RUL_CURRICULUM,
+        "min_initial_rul": 170.0,
+        "initial_rul_max": 260.0,
+    },
+    # Full environment: airport curriculum + RUL curriculum + weather.
+    "full": {
+        "enable_weather": True,
+        "airport_noise": 0.0,
+        "airport_noise_curriculum_schedule": DEFAULT_AIRPORT_NOISE_CURRICULUM,
+        "rul_curriculum_schedule": DEFAULT_RUL_CURRICULUM,
+        "min_initial_rul": 170.0,
+        "initial_rul_max": 260.0,
+    },
+}
+
+PRESET_OPTION_FLAGS: dict[str, set[str]] = {
+    "enable_weather": {"--weather", "--no-weather"},
+    "airport_noise": {"--airport-noise"},
+    "airport_noise_curriculum_schedule": {"--airport-noise-curriculum-schedule"},
+    "rul_curriculum_schedule": {"--rul-curriculum-schedule"},
+    "min_initial_rul": {"--min-initial-rul"},
+    "initial_rul_max": {"--initial-rul-max"},
+}
+
+ABLATION_RUN_ORDER = ("simple", "airport", "rul", "full")
 
 
 def ensure_lstm_model(model_path: Path, train_rolling, scaler) -> None:
@@ -165,6 +222,56 @@ def parse_rul_curriculum(
     return stages
 
 
+def parse_airport_noise_curriculum(
+    spec: str | None,
+) -> list[tuple[float, float]] | None:
+    """
+    Parse "progress:noise" curriculum stages for airport-position noise.
+
+    Example: "0:0,0.35:50,0.65:100,0.85:200".
+    """
+    if spec is None or spec.strip().lower() in {"", "none", "off", "fixed"}:
+        return None
+
+    stages: list[tuple[float, float]] = []
+    for raw_stage in spec.split(","):
+        parts = raw_stage.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Unsupported airport-noise curriculum stage {raw_stage!r}. Expected 'progress:noise'."
+            )
+        progress = float(parts[0])
+        airport_noise = float(parts[1])
+        if not 0.0 <= progress <= 1.0:
+            raise ValueError(f"Airport-noise curriculum progress must be in [0, 1], got {progress}.")
+        if airport_noise < 0.0:
+            raise ValueError(f"Airport noise must be non-negative, got {airport_noise}.")
+        stages.append((progress, airport_noise))
+
+    stages.sort(key=lambda item: item[0])
+    if not stages or stages[0][0] != 0.0:
+        raise ValueError("Airport-noise curriculum must start at progress 0.")
+    return stages
+
+
+def collect_explicit_cli_options(argv: list[str]) -> set[str]:
+    """Return CLI option names that were explicitly supplied by the user."""
+    explicit: set[str] = set()
+    for token in argv:
+        if token.startswith("--"):
+            explicit.add(token.split("=", 1)[0])
+    return explicit
+
+
+def apply_ablation_preset(args: argparse.Namespace, explicit_options: set[str]) -> None:
+    """Apply ablation preset defaults while preserving explicit CLI overrides."""
+    preset = ABLATION_PRESETS.get(args.ablation_preset, {})
+    for attr, value in preset.items():
+        option_flags = PRESET_OPTION_FLAGS.get(attr, set())
+        if explicit_options.isdisjoint(option_flags):
+            setattr(args, attr, value)
+
+
 def make_aircraft_env_factory(
     *,
     model_path: str,
@@ -172,6 +279,8 @@ def make_aircraft_env_factory(
     initial_rul_max: float | None,
     maintenance_resets_health: bool,
     eligible_units: list[int] | None,
+    airport_noise: float,
+    enable_weather: bool,
 ) -> Callable[[], AircraftEnv]:
     """
     Create a pickle-safe environment factory for SubprocVecEnv.
@@ -194,6 +303,8 @@ def make_aircraft_env_factory(
             min_initial_rul=min_initial_rul,
             initial_rul_max=initial_rul_max,
             maintenance_resets_health=maintenance_resets_health,
+            airport_noise=airport_noise,
+            enable_weather=enable_weather,
         )
 
     return _make_env
@@ -214,10 +325,14 @@ def load_or_train_ppo(args: argparse.Namespace):
 
     run_name = args.run_name or f"PPO_Run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     print(f"🏷️ Training run name: {run_name}")
+    print(f"🧪 Ablation preset: {args.ablation_preset}")
     print(f"🛩️ Eligible training engine units: {args.eligible_units}")
+    print(f"🌦️ Weather enabled: {args.enable_weather}; airport noise: ±{args.airport_noise:g}")
 
     rul_curriculum = parse_rul_curriculum(args.rul_curriculum_schedule)
+    airport_noise_curriculum = parse_airport_noise_curriculum(args.airport_noise_curriculum_schedule)
     print(f"RUL curriculum: {rul_curriculum}")
+    print(f"Airport-noise curriculum: {airport_noise_curriculum}")
 
     repo_ppo_path = models_dir / f"ppo_aircraft_{run_name}"
     stats_path = models_dir / f"ppo_aircraft_{run_name}_vec_normalize.pkl"
@@ -230,6 +345,8 @@ def load_or_train_ppo(args: argparse.Namespace):
         initial_rul_max=args.initial_rul_max,
         maintenance_resets_health=args.maintenance_resets_health,
         eligible_units=args.eligible_units,
+        airport_noise=args.airport_noise,
+        enable_weather=args.enable_weather,
     )
 
     if args.check_env:
@@ -344,6 +461,11 @@ def load_or_train_ppo(args: argparse.Namespace):
             "diag_stoch_freq": args.diag_stoch_freq,
             "diag_n_episodes": args.diag_n_episodes,
             "eval_seed": args.eval_seed,
+            "ablation_preset": args.ablation_preset,
+            "ablation_run_order": ",".join(ABLATION_RUN_ORDER),
+            "enable_weather": args.enable_weather,
+            "airport_noise": args.airport_noise,
+            "airport_noise_curriculum_schedule": args.airport_noise_curriculum_schedule,
             "min_initial_rul": args.min_initial_rul,
             "initial_rul_max": args.initial_rul_max,
             "rul_curriculum_schedule": args.rul_curriculum_schedule,
@@ -407,16 +529,29 @@ def load_or_train_ppo(args: argparse.Namespace):
             if rul_curriculum is not None
             else None
         )
+        airport_noise_curriculum_cb = (
+            AirportNoiseCurriculumCallback(
+                schedule=airport_noise_curriculum,
+                total_timesteps=args.total_timesteps,
+                eval_env=eval_env,
+                verbose=1,
+            )
+            if airport_noise_curriculum is not None
+            else None
+        )
         mlflow_cb = MLflowLoggingCallback(verbose=1)
 
-        callbacks = [
+        callbacks = []
+        if airport_noise_curriculum_cb is not None:
+            callbacks.append(airport_noise_curriculum_cb)
+        if rul_curriculum_cb is not None:
+            callbacks.append(rul_curriculum_cb)
+        callbacks.extend([
             sync_cb,
             eval_callback,
             eval_diag_det_cb,
             eval_diag_stoch_cb,
-        ]
-        if rul_curriculum_cb is not None:
-            callbacks.append(rul_curriculum_cb)
+        ])
         if ent_coef_schedule_cb is not None:
             callbacks.append(ent_coef_schedule_cb)
         callbacks.append(mlflow_cb)
@@ -448,6 +583,16 @@ def load_or_train_ppo(args: argparse.Namespace):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train PPO Agent for Aircraft Predictive Maintenance")
     parser.add_argument("--run-name", type=str, default=None, help="Custom run name. Default: timestamped PPO_Run_*.")
+    parser.add_argument(
+        "--ablation-preset",
+        type=str,
+        default="full",
+        choices=list(ABLATION_PRESETS.keys()),
+        help=(
+            "Preset for ablation progression. Recommended order: "
+            f"{', '.join(ABLATION_RUN_ORDER)}. Use 'custom' to rely only on explicit CLI flags."
+        ),
+    )
     parser.add_argument("--force-train", action="store_true", help="Train even if a model with the same run name already exists.")
     parser.add_argument("--check-env", action="store_true", help="Run stable-baselines3 check_env before training.")
 
@@ -495,11 +640,11 @@ def parse_args() -> argparse.Namespace:
         help="Fixed seed for checkpoint-selection and diagnostic evals. Use a negative value to disable fixed-seed eval.",
     )
 
-    parser.add_argument("--min-initial-rul", type=float, default=120.0)
+    parser.add_argument("--min-initial-rul", type=float, default=170.0)
     parser.add_argument(
         "--initial-rul-max",
         type=float,
-        default=None,
+        default=260.0,
         help="Optional maximum initial RUL. Use with --rul-curriculum-schedule for banded sampling.",
     )
     parser.add_argument(
@@ -519,6 +664,34 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(maintenance_resets_health=True)
     parser.add_argument(
+        "--airport-noise",
+        type=float,
+        default=DEFAULT_AIRPORT_NOISE,
+        help="Fixed airport-position randomization amplitude. Ignored after curriculum stages are applied.",
+    )
+    parser.add_argument(
+        "--airport-noise-curriculum-schedule",
+        type=str,
+        default=DEFAULT_AIRPORT_NOISE_CURRICULUM,
+        help=(
+            "Airport-noise curriculum as 'progress:noise' stages. "
+            "Use 'none' to keep fixed --airport-noise."
+        ),
+    )
+    parser.add_argument(
+        "--weather",
+        dest="enable_weather",
+        action="store_true",
+        help="Enable weather zones in AircraftEnv.",
+    )
+    parser.add_argument(
+        "--no-weather",
+        dest="enable_weather",
+        action="store_false",
+        help="Disable weather zones for simpler ablation runs.",
+    )
+    parser.set_defaults(enable_weather=True)
+    parser.add_argument(
         "--eligible-units",
         type=int,
         nargs="*",
@@ -531,8 +704,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--mlflow-tracking-uri", type=str, default="http://localhost:5000")
-    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v3")
-    return parser.parse_args()
+    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v4")
+
+    args = parser.parse_args()
+    apply_ablation_preset(args, collect_explicit_cli_options(sys.argv[1:]))
+    return args
 
 
 def main() -> None:
