@@ -68,9 +68,9 @@ class EntCoefScheduleCallback(BaseCallback):
         ent_coef = float(self.schedule(progress))
         ppo_model = cast(Any, self.model)
         ppo_model.ent_coef = ent_coef
+        # Record once through the SB3 logger. MLflowOutputFormat will forward it
+        # to MLflow on logger.dump(), avoiding duplicate train/* metric writes.
         self.logger.record("train/ent_coef_schedule", ent_coef)
-        if mlflow.active_run():
-            mlflow.log_metric("train/ent_coef_schedule", ent_coef, step=self.num_timesteps)
         return True
 
 
@@ -284,9 +284,10 @@ class EvalDiagnosticsCallback(BaseCallback):
 
         for key, value in metrics.items():
             self.logger.record(key, value)
-            if mlflow.active_run():
-                mlflow.log_metric(key, value, step=self.num_timesteps)
 
+        # Dump once through the SB3 logger. MLflowOutputFormat forwards these
+        # metrics to MLflow, so direct mlflow.log_metric() calls here would
+        # create duplicate points for eval_diag_* charts.
         self.logger.dump(step=self.num_timesteps)
 
         if self.verbose > 0:
