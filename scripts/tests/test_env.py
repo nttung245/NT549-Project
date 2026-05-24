@@ -15,7 +15,6 @@ sys.path.insert(0, PROJECT_ROOT)
 from scripts.data.data_processor import prepare_data, FEATURES, KEY_SENSORS
 from scripts.models.lstm_model import create_sequences, train_model
 from scripts.core.aircraft_env import AircraftEnv
-from scripts.core.weather import WeatherEffect
 
 
 def main():
@@ -99,19 +98,20 @@ def main():
         effective_rul=300.0,
         fuel=env.FUEL_CAPACITY,
         current_pos=0.0,
-        next_hazard_zone=None,
     )
     low_rul_pressure = env._maintenance_need_pressure(
         effective_rul=30.0,
         fuel=env.FUEL_CAPACITY,
         current_pos=0.0,
-        next_hazard_zone=None,
+    )
+    low_fuel_pressure = env._maintenance_need_pressure(
+        effective_rul=300.0,
+        fuel=20.0,
+        current_pos=0.0,
     )
     assert no_need_pressure < 0.15, f"Healthy aircraft should not need early maintenance: {no_need_pressure}"
     assert low_rul_pressure > no_need_pressure, "Low RUL should increase maintenance pressure"
-    assert env._weather_reward(WeatherEffect(zone_type="tailwind"), 0) > env._weather_reward(
-        WeatherEffect(zone_type="tailwind"), 1
-    ), "Cruising in tailwind should be more valuable than descending in tailwind"
+    assert low_fuel_pressure > no_need_pressure, "Low fuel should increase maintenance pressure"
 
     print("\n[TEST] Running Smoke Test: 5 episodes with random actions")
     print("=" * 70)
