@@ -380,7 +380,7 @@ def load_or_train_ppo(args: argparse.Namespace):
             "eval_n_episodes": args.eval_n_episodes,
             "eval_deterministic": False,
             "eval_policy": "stochastic",
-            "diag_det_freq_ignored": args.diag_det_freq,
+            "diag_det_freq": args.diag_det_freq,
             "diag_stoch_freq": args.diag_stoch_freq,
             "diag_n_episodes": args.diag_n_episodes,
             "eval_seed": args.eval_seed,
@@ -413,6 +413,15 @@ def load_or_train_ppo(args: argparse.Namespace):
             callback_on_new_best=save_vec_stats_cb,
             eval_seed=args.eval_seed,
         )
+        eval_diag_det_cb = EvalDiagnosticsCallback(
+            eval_env=eval_env,
+            eval_freq=args.diag_det_freq,
+            n_eval_episodes=args.diag_n_episodes,
+            deterministic=True,
+            log_prefix="eval_diag_det",
+            eval_seed=args.eval_seed,
+            verbose=1,
+        )
         eval_diag_stoch_cb = EvalDiagnosticsCallback(
             eval_env=eval_env,
             eval_freq=args.diag_stoch_freq,
@@ -437,6 +446,7 @@ def load_or_train_ppo(args: argparse.Namespace):
         callbacks = [
             sync_cb,
             eval_callback,
+            eval_diag_det_cb,
             eval_diag_stoch_cb,
         ]
         if ent_coef_schedule_cb is not None:
@@ -483,7 +493,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-train", action="store_true", help="Train even if a model with the same run name already exists.")
     parser.add_argument("--check-env", action="store_true", help="Run stable-baselines3 check_env before training.")
 
-    parser.add_argument("--total-timesteps", type=int, default=1_500_000)
+    parser.add_argument("--total-timesteps", type=int, default=500_000)
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument(
@@ -520,8 +530,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--diag-det-freq",
         type=int,
-        default=0,
-        help="Deprecated compatibility flag; deterministic diagnostics are disabled.",
+        default=40000,
+        help="Frequency for deterministic diagnostic evaluations logged to MLflow. Set <= 0 to disable.",
     )
     parser.add_argument("--diag-stoch-freq", type=int, default=40000)
     parser.add_argument("--diag-n-episodes", type=int, default=30)
