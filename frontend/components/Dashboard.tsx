@@ -6,109 +6,146 @@ export default function Dashboard({
   onPlayPause,
   onStepFly,
   onStepLand,
+  onStepClimb,
   onReset,
 }: {
   state: SimState | null;
   onPlayPause: () => void;
   onStepFly: () => void;
   onStepLand: () => void;
+  onStepClimb: () => void;
   onReset: () => void;
 }) {
   if (!state) return null;
 
   const rulPct = Math.max(0, Math.min(100, (state.rul / 150) * 100));
   const fuelPct = Math.max(0, Math.min(100, (state.fuel / state.fuel_capacity) * 100));
+  const isRiskyWeather = state.weather === 'storm' || state.weather === 'turbulence';
+  const policyMode = state.policy_mode ?? 'deterministic';
+  const maintenancePressure = Math.max(0, Math.min(1, state.maintenance_pressure ?? 0));
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
-      {/* Metrics Card */}
-      <div className="bg-slate-800/80 backdrop-blur-lg border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col space-y-6">
-        <h3 className="text-xl font-semibold tracking-tight text-white mb-2">Engine Analytics</h3>
-        
-        {/* RUL Bar */}
-        <div>
-          <div className="flex justify-between text-sm mb-1 font-medium">
-            <span className="text-slate-400">RUL (Cycles)</span>
-            <span className={state.rul < 30 ? "text-red-400" : "text-green-400"}>{Math.round(state.rul)}</span>
+    <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[1.05fr_1.2fr_0.95fr]">
+      <section className="rounded-lg border border-slate-700 bg-slate-950/70 p-5 shadow-xl">
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-white">Engine</h3>
+            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">PPO telemetry</p>
           </div>
-          <div className="w-full bg-slate-700/50 rounded-full h-3 backdrop-blur-sm overflow-hidden border border-white/5">
-            <div
-              className={`h-full rounded-full transition-all duration-300 ${state.rul < 30 ? 'bg-gradient-to-r from-red-600 to-red-400 shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-gradient-to-r from-emerald-600 to-emerald-400'}`}
-              style={{ width: `${rulPct}%` }}
-            />
-          </div>
+          <span className={`rounded-md border px-2 py-1 text-xs font-bold ${state.rul < 30 ? 'border-red-400/40 bg-red-400/10 text-red-200' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'}`}>
+            RUL {Math.round(state.rul)}
+          </span>
         </div>
 
-        {/* Fuel Bar */}
-        <div>
-          <div className="flex justify-between text-sm mb-1 font-medium">
-            <span className="text-slate-400">Fuel Reserves</span>
-            <span className={state.fuel < 20 ? "text-orange-400" : "text-sky-400"}>{state.fuel.toFixed(1)}</span>
+        <div className="space-y-5">
+          <div>
+            <div className="mb-2 flex justify-between text-sm font-medium">
+              <span className="text-slate-400">Remaining useful life</span>
+              <span className={state.rul < 30 ? 'text-red-300' : 'text-emerald-300'}>{Math.round(state.rul)} cycles</span>
+            </div>
+            <div className="h-3 overflow-hidden rounded bg-slate-800">
+              <div
+                className={`h-full transition-all duration-300 ${state.rul < 30 ? 'bg-red-400' : 'bg-emerald-400'}`}
+                style={{ width: `${rulPct}%` }}
+              />
+            </div>
           </div>
-          <div className="w-full bg-slate-700/50 rounded-full h-3 backdrop-blur-sm overflow-hidden border border-white/5">
-            <div
-              className="h-full bg-gradient-to-r from-sky-600 to-sky-400 rounded-full transition-all duration-300"
-              style={{ width: `${fuelPct}%` }}
-            />
+
+          <div>
+            <div className="mb-2 flex justify-between text-sm font-medium">
+              <span className="text-slate-400">Fuel reserves</span>
+              <span className={state.fuel < 20 ? 'text-orange-300' : 'text-sky-300'}>{state.fuel.toFixed(1)}</span>
+            </div>
+            <div className="h-3 overflow-hidden rounded bg-slate-800">
+              <div className="h-full bg-sky-400 transition-all duration-300" style={{ width: `${fuelPct}%` }} />
+            </div>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Flight Stats Card */}
-      <div className="bg-slate-800/80 backdrop-blur-lg border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col justify-center space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="bg-slate-900/50 rounded-2xl p-4 border border-white/5 cursor-default hover:bg-slate-900/70 transition-colors">
-            <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Altitude</p>
-            <p className="text-2xl font-bold text-slate-100 font-mono mt-1">{Math.round(state.altitude)} m</p>
+      <section className="rounded-lg border border-slate-700 bg-slate-950/70 p-5 shadow-xl">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h3 className="text-base font-semibold text-white">Flight State</h3>
+          <span className="rounded-md border border-slate-600 bg-slate-900 px-2 py-1 text-xs font-bold uppercase tracking-[0.14em] text-slate-200">
+            {state.action} / {policyMode}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Altitude</p>
+            <p className="mt-2 font-mono text-xl font-bold text-slate-100">{Math.round(state.altitude)}m</p>
           </div>
-          <div className="bg-slate-900/50 rounded-2xl p-4 border border-white/5 cursor-default hover:bg-slate-900/70 transition-colors">
-            <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Dist Dest.</p>
-            <p className="text-2xl font-bold text-slate-100 font-mono mt-1">{Math.round(state.dist_dest)}</p>
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Velocity</p>
+            <p className="mt-2 font-mono text-xl font-bold text-slate-100">{Math.round(state.velocity)}</p>
           </div>
-          <div className="bg-slate-900/50 rounded-2xl p-4 border border-white/5 cursor-default hover:bg-slate-900/70 transition-colors">
-            <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Dist Next</p>
-            <p className="text-2xl font-bold text-slate-100 font-mono mt-1">{Math.round(state.dist_next)}</p>
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Dest</p>
+            <p className="mt-2 font-mono text-xl font-bold text-slate-100">{Math.round(state.dist_dest)}</p>
           </div>
-          <div className="bg-slate-900/50 rounded-2xl p-4 border border-white/5 cursor-default hover:bg-slate-900/70 transition-colors">
-            <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold">Last Action</p>
-            <p className={`text-xl font-bold font-mono mt-1 ${state.action === 'LAND' ? 'text-orange-400 drop-shadow-[0_0_8px_rgba(251,146,60,0.5)]' : 'text-cyan-400'}`}>{state.action}</p>
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Next AP</p>
+            <p className="mt-2 font-mono text-xl font-bold text-slate-100">{Math.round(state.dist_next)}</p>
+          </div>
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Need</p>
+            <p className={`mt-2 font-mono text-xl font-bold ${maintenancePressure > 0.45 ? 'text-amber-200' : 'text-slate-100'}`}>
+              {(maintenancePressure * 100).toFixed(0)}%
+            </p>
+          </div>
+          <div className="rounded-md border border-slate-800 bg-slate-900/70 p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Approach</p>
+            <p className={`mt-2 font-mono text-xl font-bold ${state.in_approach_zone ? 'text-cyan-200' : 'text-slate-100'}`}>
+              {state.in_approach_zone ? (state.landing_feasible_now ? 'READY' : 'ZONE') : 'NO'}
+            </p>
           </div>
         </div>
-      </div>
+      </section>
 
-      {/* Controls Card */}
-      <div className="bg-slate-800/80 backdrop-blur-lg border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col items-center justify-center space-y-4 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-3xl" />
-        <h3 className="text-lg font-semibold tracking-tight text-white/80 shrink-0 w-full text-center">Nav Controls</h3>
-        
-        <div className="grid grid-cols-2 gap-3 w-full">
-            <button
-            onClick={onPlayPause}
-            className="col-span-2 py-3 rounded-2xl font-bold tracking-widest uppercase bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_4px_14px_0_rgba(79,70,229,0.39)] transition-all active:scale-95 border border-indigo-400/50"
-            >
+      <section className="rounded-lg border border-slate-700 bg-slate-950/70 p-5 shadow-xl">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h3 className="text-base font-semibold text-white">Weather</h3>
+          <span className={`rounded-md border px-2 py-1 text-xs font-bold uppercase ${isRiskyWeather ? 'border-amber-300/50 bg-amber-300/10 text-amber-100' : 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'}`}>
+            {state.weather}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="rounded-md bg-slate-900 p-2">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Wind</p>
+            <p className="mt-1 font-mono text-lg text-slate-100">{state.wind_strength.toFixed(1)}</p>
+          </div>
+          <div className="rounded-md bg-slate-900 p-2">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Fuel</p>
+            <p className="mt-1 font-mono text-lg text-slate-100">x{state.weather_fuel_multiplier.toFixed(1)}</p>
+          </div>
+          <div className="rounded-md bg-slate-900 p-2">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-slate-500">Speed</p>
+            <p className="mt-1 font-mono text-lg text-slate-100">x{(state.weather_speed_multiplier ?? 1).toFixed(1)}</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-slate-700 bg-slate-950/70 p-4 shadow-xl lg:col-span-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <button onClick={onPlayPause} className="rounded-md border border-cyan-400/40 bg-cyan-400/15 px-4 py-3 text-sm font-bold uppercase tracking-[0.14em] text-cyan-50 transition hover:bg-cyan-400/25 active:scale-[0.98]">
             Play / Pause
-            </button>
-            <button
-            onClick={onStepFly}
-            className="py-3 rounded-2xl font-bold tracking-widest text-sm uppercase bg-cyan-900/80 hover:bg-cyan-800 text-cyan-100 border border-cyan-500/30 transition-all active:scale-95"
-            >
-            Step Fly
-            </button>
-            <button
-            onClick={onStepLand}
-            className="py-3 rounded-2xl font-bold tracking-widest text-sm uppercase bg-orange-900/80 hover:bg-orange-800 text-orange-100 border border-orange-500/30 transition-all active:scale-95"
-            >
-            Step Land
-            </button>
-             <button
-            onClick={onReset}
-            className="col-span-2 py-3 rounded-2xl mt-2 font-bold tracking-widest text-xs uppercase bg-slate-700/50 hover:bg-slate-600 text-slate-300 border border-slate-500/30 transition-all active:scale-95"
-            >
-            Reset Episode
-            </button>
+          </button>
+          <button onClick={onStepFly} className="rounded-md border border-slate-600 bg-slate-800 px-4 py-3 text-sm font-bold uppercase tracking-[0.14em] text-slate-100 transition hover:bg-slate-700 active:scale-[0.98]">
+            Cruise
+          </button>
+          <button onClick={onStepClimb} className="rounded-md border border-sky-400/40 bg-sky-400/15 px-4 py-3 text-sm font-bold uppercase tracking-[0.14em] text-sky-50 transition hover:bg-sky-400/25 active:scale-[0.98]">
+            Climb
+          </button>
+          <button onClick={onStepLand} className="rounded-md border border-orange-400/40 bg-orange-400/15 px-4 py-3 text-sm font-bold uppercase tracking-[0.14em] text-orange-50 transition hover:bg-orange-400/25 active:scale-[0.98]">
+            Descend
+          </button>
+          <button onClick={onReset} className="col-span-2 rounded-md border border-red-400/40 bg-red-400/10 px-4 py-3 text-sm font-bold uppercase tracking-[0.14em] text-red-50 transition hover:bg-red-400/20 active:scale-[0.98] sm:col-span-1">
+            Reset
+          </button>
         </div>
-      </div>
-
+      </section>
     </div>
   );
 }

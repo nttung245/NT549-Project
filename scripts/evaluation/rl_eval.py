@@ -24,7 +24,7 @@ def evaluate_rl_agent(
     scaler,
     num_episodes=20,
     stats_path=None,
-    deterministic: bool = True,
+    deterministic: bool = False,
     eligible_units: list[int] | None = None,
     min_initial_rul: float = 120.0,
     maintenance_resets_health: bool = True,
@@ -41,7 +41,7 @@ def evaluate_rl_agent(
         scaler: Fitted StandardScaler.
         num_episodes: Number of complete routes to evaluate.
         stats_path: Optional VecNormalize stats. Must match PPO training stats.
-        deterministic: Use deterministic policy actions for stable benchmark eval.
+        deterministic: Use deterministic argmax actions only for explicit debugging. Defaults to False so PPO is evaluated as the stochastic policy it learned.
         eligible_units: Optional unit IDs to sample from.
         min_initial_rul: Filter out units that start below this RUL threshold.
         maintenance_resets_health: Match training env maintenance semantics.

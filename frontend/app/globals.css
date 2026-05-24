@@ -11,7 +11,7 @@ body {
 }
 
 body {
-  background-color: #020617;
+  background-color: #06111f;
   color: #f1f5f9;
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -29,4 +29,121 @@ body {
   border-top: 1px solid rgb(255 255 255 / 0.1);
   border-left: 1px solid rgb(255 255 255 / 0.1);
   box-shadow: 0 8px 32px 0 rgb(0 0 0 / 0.37);
+}
+
+.weather-flow {
+  animation: weather-flow 2.2s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.weather-flow-reverse {
+  animation: weather-flow-reverse 2.4s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.turbulence-wave {
+  animation: turbulence-wave 1.4s ease-in-out infinite alternate;
+}
+
+.storm-flash {
+  animation: storm-flash 2.8s ease-in-out infinite;
+}
+
+.lightning-strike {
+  animation: lightning-strike 2.8s step-end infinite;
+}
+
+.hazard-ring {
+  animation: hazard-ring 1.1s ease-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.aircraft-shake {
+  animation: aircraft-shake 0.34s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@keyframes weather-flow {
+  from {
+    transform: translateX(-12px);
+  }
+  to {
+    transform: translateX(12px);
+  }
+}
+
+@keyframes weather-flow-reverse {
+  from {
+    transform: translateX(12px);
+  }
+  to {
+    transform: translateX(-12px);
+  }
+}
+
+@keyframes turbulence-wave {
+  from {
+    stroke-dashoffset: 0;
+    opacity: 0.35;
+  }
+  to {
+    stroke-dashoffset: 22;
+    opacity: 0.75;
+  }
+}
+
+@keyframes storm-flash {
+  0%,
+  72%,
+  100% {
+    opacity: 0.02;
+  }
+  74%,
+  77% {
+    opacity: 0.22;
+  }
+}
+
+@keyframes lightning-strike {
+  0%,
+  68%,
+  78%,
+  100% {
+    opacity: 0.14;
+  }
+  70%,
+  76% {
+    opacity: 1;
+  }
+}
+
+@keyframes hazard-ring {
+  from {
+    transform: scale(0.88);
+    opacity: 0.85;
+  }
+  to {
+    transform: scale(1.12);
+    opacity: 0.2;
+  }
+}
+
+@keyframes aircraft-shake {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(2px, -2px);
+  }
+  50% {
+    transform: translate(-2px, 1px);
+  }
+  75% {
+    transform: translate(1px, 2px);
+  }
 }
