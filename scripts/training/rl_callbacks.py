@@ -68,68 +68,9 @@ class EntCoefScheduleCallback(BaseCallback):
         ent_coef = float(self.schedule(progress))
         ppo_model = cast(Any, self.model)
         ppo_model.ent_coef = ent_coef
+        # Record once through the SB3 logger. MLflowOutputFormat will forward it
+        # to MLflow on logger.dump(), avoiding duplicate train/* metric writes.
         self.logger.record("train/ent_coef_schedule", ent_coef)
-        if mlflow.active_run():
-            mlflow.log_metric("train/ent_coef_schedule", ent_coef, step=self.num_timesteps)
-        return True
-
-
-class RulCurriculumCallback(BaseCallback):
-    """Switch initial-RUL sampling bands as PPO training progresses."""
-
-    def __init__(
-        self,
-        schedule: list[tuple[float, float, float | None]],
-        total_timesteps: int,
-        eval_env=None,
-        verbose: int = 0,
-    ):
-        super().__init__(verbose)
-        self.schedule = sorted(schedule, key=lambda item: item[0])
-        self.total_timesteps = max(1, int(total_timesteps))
-        self.eval_env = eval_env
-        self.current_stage = -1
-
-    def _stage_for_progress(self, progress: float) -> int:
-        stage = 0
-        for idx, (start, _, _) in enumerate(self.schedule):
-            if progress >= start:
-                stage = idx
-        return stage
-
-    def _apply_stage(self, stage: int) -> None:
-        _, min_rul, max_rul = self.schedule[stage]
-        max_arg = max_rul if max_rul is not None else None
-        self.training_env.env_method("set_initial_rul_range", min_rul, max_arg)
-        if self.eval_env is not None:
-            self.eval_env.env_method("set_initial_rul_range", min_rul, max_arg)
-        self.current_stage = stage
-        self.logger.record("curriculum/rul_stage", float(stage))
-        self.logger.record("curriculum/min_initial_rul", float(min_rul))
-        self.logger.record("curriculum/initial_rul_max", float(max_rul if max_rul is not None else -1.0))
-        if mlflow.active_run():
-            mlflow.log_metric("curriculum/rul_stage", float(stage), step=self.num_timesteps)
-            mlflow.log_metric("curriculum/min_initial_rul", float(min_rul), step=self.num_timesteps)
-            mlflow.log_metric(
-                "curriculum/initial_rul_max",
-                float(max_rul if max_rul is not None else -1.0),
-                step=self.num_timesteps,
-            )
-        if self.verbose > 0:
-            max_label = "none" if max_rul is None else f"{max_rul:g}"
-            print(f"RUL curriculum stage {stage}: {min_rul:g}-{max_label}")
-
-    def _on_training_start(self) -> None:
-        if self.schedule:
-            self._apply_stage(0)
-
-    def _on_step(self) -> bool:
-        if not self.schedule:
-            return True
-        progress = min(1.0, float(self.num_timesteps) / float(self.total_timesteps))
-        stage = self._stage_for_progress(progress)
-        if stage != self.current_stage:
-            self._apply_stage(stage)
         return True
 
 
@@ -223,11 +164,18 @@ class EvalDiagnosticsCallback(BaseCallback):
             self.eval_env.seed(self.eval_seed)
 
         event_counts: Counter[str] = Counter()
+        step_event_counts: Counter[str] = Counter()
         action_counts: Counter[int] = Counter()
         rewards: list[float] = []
         lengths: list[int] = []
         final_altitudes: list[float] = []
         first_descend_distances: list[float] = []
+        nearest_landing_distances: list[float] = []
+        landing_profile_errors: list[float] = []
+        soft_field_crash_distances: list[float] = []
+        soft_landing_distances: list[float] = []
+        airport_noises: list[float] = []
+        weather_enabled_flags: list[float] = []
         landing_feasible_count = 0
         landing_feasible_checks = 0
 
@@ -258,6 +206,23 @@ class EvalDiagnosticsCallback(BaseCallback):
                     first_descend_seen = True
                     first_descend_distances.append(float(last_info.get("dist_to_next_target", np.nan)))
 
+                step_event = last_info.get("event")
+                if step_event:
+                    step_event_counts[str(step_event)] += 1
+
+                if "nearest_landing_distance" in last_info:
+                    nearest_landing_distances.append(float(last_info.get("nearest_landing_distance", np.nan)))
+                if "landing_profile_error" in last_info:
+                    landing_profile_errors.append(float(last_info.get("landing_profile_error", np.nan)))
+                if "soft_field_crash_distance" in last_info:
+                    soft_field_crash_distances.append(float(last_info.get("soft_field_crash_distance", np.nan)))
+                if "soft_landing_distance" in last_info:
+                    soft_landing_distances.append(float(last_info.get("soft_landing_distance", np.nan)))
+                if "airport_noise" in last_info:
+                    airport_noises.append(float(last_info.get("airport_noise", np.nan)))
+                if "weather_enabled" in last_info:
+                    weather_enabled_flags.append(1.0 if bool(last_info.get("weather_enabled")) else 0.0)
+
                 if "landing_feasible_now" in last_info:
                     landing_feasible_checks += 1
                     if bool(last_info["landing_feasible_now"]):
@@ -278,6 +243,20 @@ class EvalDiagnosticsCallback(BaseCallback):
             float(landing_feasible_count / landing_feasible_checks)
             if landing_feasible_checks else 0.0
         )
+        mean_nearest_landing_distance = (
+            float(np.nanmean(nearest_landing_distances)) if nearest_landing_distances else -1.0
+        )
+        mean_landing_profile_error = (
+            float(np.nanmean(landing_profile_errors)) if landing_profile_errors else -1.0
+        )
+        mean_soft_field_crash_distance = (
+            float(np.nanmean(soft_field_crash_distances)) if soft_field_crash_distances else -1.0
+        )
+        mean_soft_landing_distance = (
+            float(np.nanmean(soft_landing_distances)) if soft_landing_distances else -1.0
+        )
+        mean_airport_noise = float(np.nanmean(airport_noises)) if airport_noises else -1.0
+        weather_enabled_ratio = float(np.mean(weather_enabled_flags)) if weather_enabled_flags else -1.0
         total_actions = sum(action_counts.values()) or 1
 
         metrics = {
@@ -286,6 +265,12 @@ class EvalDiagnosticsCallback(BaseCallback):
             f"{self.log_prefix}/mean_final_altitude": mean_final_altitude,
             f"{self.log_prefix}/mean_first_descend_distance": mean_first_descend_distance,
             f"{self.log_prefix}/landing_feasible_ratio": feasible_ratio,
+            f"{self.log_prefix}/mean_nearest_landing_distance": mean_nearest_landing_distance,
+            f"{self.log_prefix}/mean_landing_profile_error": mean_landing_profile_error,
+            f"{self.log_prefix}/mean_soft_field_crash_distance": mean_soft_field_crash_distance,
+            f"{self.log_prefix}/mean_soft_landing_distance": mean_soft_landing_distance,
+            f"{self.log_prefix}/mean_airport_noise": mean_airport_noise,
+            f"{self.log_prefix}/weather_enabled_ratio": weather_enabled_ratio,
             f"{self.log_prefix}/action_cruise_ratio": action_counts[0] / total_actions,
             f"{self.log_prefix}/action_descend_ratio": action_counts[1] / total_actions,
             f"{self.log_prefix}/action_climb_ratio": action_counts[2] / total_actions,
@@ -294,12 +279,15 @@ class EvalDiagnosticsCallback(BaseCallback):
         }
         for event_name, count in event_counts.items():
             metrics[f"{self.log_prefix}/event_{event_name}"] = float(count)
+        for event_name, count in step_event_counts.items():
+            metrics[f"{self.log_prefix}/step_event_{event_name}"] = float(count)
 
         for key, value in metrics.items():
             self.logger.record(key, value)
-            if mlflow.active_run():
-                mlflow.log_metric(key, value, step=self.num_timesteps)
 
+        # Dump once through the SB3 logger. MLflowOutputFormat forwards these
+        # metrics to MLflow, so direct mlflow.log_metric() calls here would
+        # create duplicate points for eval_diag_* charts.
         self.logger.dump(step=self.num_timesteps)
 
         if self.verbose > 0:

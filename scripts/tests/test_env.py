@@ -68,6 +68,32 @@ def main():
         for unit_id in high_rul_env.engine_units
     ), "Curriculum RUL update selected an engine outside the requested band"
 
+    ablation_env = AircraftEnv(
+        fleet_data=train_rolling,
+        model_path=model_path,
+        scaler=scaler,
+        sensor_list=KEY_SENSORS,
+        features_list=FEATURES,
+        airport_noise=0.0,
+        enable_weather=False,
+    )
+    ablation_obs, ablation_info = ablation_env.reset(seed=123)
+    assert ablation_obs.shape == ablation_env.observation_space.shape == (19,)
+    assert ablation_info.get("weather_zones", []) == [], "Weather-disabled ablation should have no weather zones"
+    assert ablation_info.get("weather_enabled") is False, "Weather-disabled ablation should report weather_enabled=False"
+    assert ablation_info.get("airport_noise") == 0.0, "Fixed-airport ablation should report airport_noise=0"
+    assert np.allclose(
+        ablation_env.sub_airports,
+        [2857.0, 5714.0, 8571.0, 11428.0, 14285.0, 17142.0],
+    ), "airport_noise=0 should keep fixed sub-airport positions"
+    ablation_env.set_airport_noise(50.0)
+    _, noisy_airport_info = ablation_env.reset(seed=123)
+    assert noisy_airport_info.get("airport_noise") == 50.0, "Airport-noise setter did not update reset info"
+    assert all(
+        abs(ap - base) <= 50.0
+        for ap, base in zip(ablation_env.sub_airports, [2857.0, 5714.0, 8571.0, 11428.0, 14285.0, 17142.0])
+    ), "Airport-noise curriculum setter produced airport offsets outside the requested band"
+
     obs, _ = env.reset(seed=123)
     no_need_pressure = env._maintenance_need_pressure(
         effective_rul=300.0,
