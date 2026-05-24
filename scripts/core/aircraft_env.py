@@ -18,7 +18,7 @@ import pandas as pd
 
 from scripts.core.digital_twin import AircraftDigitalTwin
 from scripts.data.data_processor import FEATURES, KEY_SENSORS, SEQUENCE_LENGTH
-from scripts.core.weather import WeatherEffect, WeatherMap, WeatherZone
+from scripts.core.weather import WeatherEffect, WeatherMap
 
 
 class AircraftEnv(gym.Env):
@@ -60,7 +60,7 @@ class AircraftEnv(gym.Env):
     FUEL_RATE = 0.5           # Nhiên liệu tiêu hao cơ bản mỗi cycle
     TOTAL_DISTANCE = 20000.0  # Tổng quãng đường bay (đơn vị)
     NUM_SUB_AIRPORTS = 6      # Số sân bay phụ trên đường bay
-    FUEL_CAPACITY = 250.0     # Dung tích nhiên liệu tối đa
+    FUEL_CAPACITY = 225.0     # Dung tích nhiên liệu tối đa
 
     # ── Landing-softening constants ─────────────────────────────
     # Keep the 3-action interface but prevent one slightly early DESCEND from
@@ -369,10 +369,8 @@ class AircraftEnv(gym.Env):
                 reward_components["weather_rul_damage"] = -extra_rul_damage
         effective_rul = max(0.0, predicted_rul - self.weather_rul_damage)
 
-        weather_reward = self._weather_reward(weather, action_int)
-        if weather_reward != 0.0:
-            reward += weather_reward
-            reward_components["weather"] = weather_reward
+        # Weather affects dynamics directly through speed/fuel/RUL multipliers;
+        # no extra rule-based weather reward is applied.
 
         # Vị trí hiện tại SAU khi di chuyển
         current_pos = self.TOTAL_DISTANCE - self.distance_to_destination
@@ -388,12 +386,10 @@ class AircraftEnv(gym.Env):
                 next_ap = min(ahead_airports)
                 dist_to_next_target = next_ap - current_pos
 
-        next_hazard_zone = self.weather_map.get_next_zone(current_pos)
         maintenance_pressure = self._maintenance_need_pressure(
             effective_rul=effective_rul,
             fuel=float(self.twin.fuel),
             current_pos=float(current_pos),
-            next_hazard_zone=next_hazard_zone,
         )
 
         # ── Approach Guidance Reward ───────────────────────────────
@@ -493,24 +489,22 @@ class AircraftEnv(gym.Env):
                     # Thưởng tỷ lệ với quãng đường đã bay từ lần bảo trì trước
                     # → Ngăn Agent "farm" bằng cách climb/descend tại chỗ (chỉ ~35m)
                     # → Khuyến khích bay đủ xa rồi mới bảo trì
-                    landing_accuracy_bonus = max(0.0, (1.0 - dist_nearest_abs / self.LANDING_THRESHOLD) * 5.0)
-                    progress_bonus = min(self.dist_since_last_maintenance / 500.0, 6.0)
-                    if maintenance_pressure < 0.15:
-                        unnecessary_penalty = -12.0 * (1.0 - maintenance_pressure)
+                    landing_accuracy_bonus = max(0.0, (1.0 - dist_nearest_abs / self.LANDING_THRESHOLD) * 2.0)
+                    progress_bonus = min(self.dist_since_last_maintenance / 2000.0, 2.0)
+                    maintenance_threshold = 0.45
+                    if maintenance_pressure < maintenance_threshold:
+                        unnecessary_penalty = -14.0 * (1.0 - maintenance_pressure)
                         reward += unnecessary_penalty
                         reward_components["unnecessary_maintenance"] = unnecessary_penalty
                         maintenance_reward = 0.0
                     else:
+                        need_score = (maintenance_pressure - maintenance_threshold) / (1.0 - maintenance_threshold)
                         maintenance_reward = (
-                            4.0
-                            + 22.0 * maintenance_pressure
+                            -6.0
+                            + 18.0 * need_score
                             + progress_bonus
                             + landing_accuracy_bonus
                         )
-                        if weather.zone_type == "turbulence":
-                            rough_landing_loss = maintenance_reward * 0.5
-                            maintenance_reward -= rough_landing_loss
-                            reward_components["rough_landing_bonus_loss"] = -rough_landing_loss
                         reward += maintenance_reward
                         reward_components["maintenance"] = maintenance_reward
             
@@ -731,7 +725,7 @@ class AircraftEnv(gym.Env):
         return ahead_airports + [self.TOTAL_DISTANCE]
 
     def _estimated_cruise_range(self, fuel: float, altitude: float) -> float:
-        """Approximate remaining cruise range with a reserve for bad weather and descent."""
+        """Approximate remaining cruise range with a route reserve."""
         altitude_ratio = float(np.clip(altitude / self.MAX_ALTITUDE, 0.0, 1.0))
         cruise_speed = 25.0 + altitude_ratio * 15.0
         fuel_rate = 0.5 - altitude_ratio * 0.2
@@ -743,14 +737,13 @@ class AircraftEnv(gym.Env):
         effective_rul: float,
         fuel: float,
         current_pos: float,
-        next_hazard_zone: WeatherZone | None,
     ) -> float:
         """
-        Estimate whether the next airport is strategically needed.
+        Estimate whether the next airport is strategically needed from fuel/RUL only.
 
-        Pressure is near zero when the aircraft can skip the next airport and
-        still reach the following airport/destination with fuel and RUL reserve.
-        It rises when RUL/fuel reserves are thin or a severe hazard is imminent.
+        Weather and hazard proximity are deliberately excluded from this pressure
+        so the agent learns weather-aware behavior from transition dynamics
+        instead of a hand-coded landing rule.
         """
         targets = self._route_targets_ahead(current_pos)
         if not targets:
@@ -767,30 +760,7 @@ class AircraftEnv(gym.Env):
         cycles_needed_to_skip = skip_distance / max(1.0, nominal_speed)
         rul_pressure = float(np.clip((cycles_needed_to_skip + 20.0 - effective_rul) / 70.0, 0.0, 1.0))
 
-        hazard_pressure = 0.0
-        if next_hazard_zone is not None:
-            hazard_distance = max(0.0, float(next_hazard_zone.start - current_pos))
-            first_target_distance = max(0.0, targets[0] - current_pos)
-            if hazard_distance <= first_target_distance + 700.0:
-                if next_hazard_zone.zone_type == "storm":
-                    hazard_pressure = 0.45
-                elif next_hazard_zone.zone_type == "turbulence":
-                    hazard_pressure = 0.30
-
-        return float(np.clip(max(fuel_pressure, rul_pressure, hazard_pressure), 0.0, 1.0))
-
-    @staticmethod
-    def _weather_reward(weather: WeatherEffect, action_int: int) -> float:
-        """Small shaping term for readable weather-aware behavior."""
-        if weather.zone_type == "tailwind":
-            return 0.08 if action_int == 0 else 0.03
-        if weather.zone_type == "headwind":
-            return -0.03
-        if weather.zone_type == "storm":
-            return -0.08
-        if weather.zone_type == "turbulence":
-            return -0.05
-        return 0.0
+        return float(np.clip(max(fuel_pressure, rul_pressure), 0.0, 1.0))
 
     def _dist_to_nearest_airport(self) -> float:
         """Khoảng cách tuyệt đối đến sân bay gần nhất (cả phía trước và phía sau)."""
