@@ -2,7 +2,9 @@ import asyncio
 import json
 import os
 import sys
+from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -17,7 +19,7 @@ from scripts.core.aircraft_env import AircraftEnv
 from scripts.core.digital_twin import AircraftDigitalTwin
 
 # RL Components
-from stable_baselines3 import PPO
+from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
 app = FastAPI(title="Aircraft Digital Twin - WebSocket Server")
@@ -37,7 +39,7 @@ is_running = False
 current_state = {}
 clients = set()
 lstm_model = None
-ppo_model = None
+rl_model: Any | None = None
 vec_normalize = None
 
 def _parse_float_env(name: str, default: float | None) -> float | None:
@@ -53,14 +55,29 @@ def _parse_eligible_units(raw_value: str | None) -> list[int] | None:
     return [int(part.strip()) for part in raw_value.split(",") if part.strip()]
 
 
-# Match the latest trained PPO run used by the stable demo.
-DEFAULT_PPO_RUN_NAME = os.environ.get("PPO_RUN_NAME", "PPO_Run_20260516_143227")
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+MODEL_ALGO = os.environ.get("MODEL_ALGO", os.environ.get("RL_ALGO", "ppo")).strip().lower()
+if MODEL_ALGO not in {"ppo", "dqn"}:
+    MODEL_ALGO = "ppo"
+
+DEFAULT_PPO_RUN_NAME = os.environ.get("PPO_RUN_NAME", "PPO_Run_20260524_075138")
+DEFAULT_DQN_RUN_NAME = os.environ.get("DQN_RUN_NAME", "DQN_Run_20260524_043809")
+ACTIVE_RUN_NAME = os.environ.get("RUN_NAME") or (DEFAULT_DQN_RUN_NAME if MODEL_ALGO == "dqn" else DEFAULT_PPO_RUN_NAME)
 MIN_INITIAL_RUL = _parse_float_env("MIN_INITIAL_RUL", 120.0)
-INITIAL_RUL_MAX = _parse_float_env("INITIAL_RUL_MAX", None)
+INITIAL_RUL_MAX = _parse_float_env("INITIAL_RUL_MAX", 335.0)
+AIRPORT_NOISE = float(_parse_float_env("AIRPORT_NOISE", 200.0) or 0.0)
+ENABLE_WEATHER = _parse_bool_env("ENABLE_WEATHER", True)
 DEFAULT_ELIGIBLE_UNITS = _parse_eligible_units(os.environ.get("ELIGIBLE_UNITS"))
 POLICY_MODE = os.environ.get("POLICY_MODE", "deterministic").strip().lower()
 if POLICY_MODE not in {"deterministic", "stochastic"}:
     POLICY_MODE = "deterministic"
+POLICY_DEVICE = os.environ.get("POLICY_DEVICE", "cpu").strip().lower()
 
 @app.on_event("startup")
 async def startup_event():
@@ -90,47 +107,52 @@ async def startup_event():
         eligible_units=DEFAULT_ELIGIBLE_UNITS,
         min_initial_rul=float(MIN_INITIAL_RUL or 0.0),
         initial_rul_max=INITIAL_RUL_MAX,
+        airport_noise=AIRPORT_NOISE,
+        enable_weather=ENABLE_WEATHER,
     )
     
     obs, info = env.reset()
     
     # --- Load RL Agent ---
-    best_ppo_dir = os.path.join(PROJECT_ROOT, "models", f"best_ppo_{DEFAULT_PPO_RUN_NAME}")
-    ppo_path = os.path.join(best_ppo_dir, "best_model.zip")
-    stats_path = os.path.join(best_ppo_dir, "vec_normalize.pkl")
+    best_model_dir = os.path.join(PROJECT_ROOT, "models", f"best_{MODEL_ALGO}_{ACTIVE_RUN_NAME}")
+    policy_path = os.path.join(best_model_dir, "best_model.zip")
+    stats_path = os.path.join(best_model_dir, "vec_normalize.pkl")
     print(
         "[CONFIG] RUL band: "
         f"min={MIN_INITIAL_RUL}, max={INITIAL_RUL_MAX}, eligible_units={DEFAULT_ELIGIBLE_UNITS or 'all'}"
     )
+    print(f"[CONFIG] Algorithm for UI: {MODEL_ALGO.upper()}")
     print(f"[CONFIG] Policy mode for UI: {POLICY_MODE}")
-    print(f"🔎 PPO run for UI: {DEFAULT_PPO_RUN_NAME}")
-    print(f"🔎 PPO model path: {ppo_path}")
+    print(f"[CONFIG] Airport noise: ±{AIRPORT_NOISE:g}; weather={ENABLE_WEATHER}")
+    print(f"🔎 Run for UI: {ACTIVE_RUN_NAME}")
+    print(f"🔎 Model path: {policy_path}")
     print(f"🔎 VecNormalize path: {stats_path}")
     
-    global ppo_model, vec_normalize
-    if os.path.exists(ppo_path) and os.path.exists(stats_path):
+    global rl_model, vec_normalize
+    if os.path.exists(policy_path) and os.path.exists(stats_path):
         try:
-            # We need a DummyVecEnv to wrap for VecNormalize
+            # We need a DummyVecEnv to wrap for VecNormalize.
             def make_dummy_env():
                 if env is None:
                     raise RuntimeError("Environment has not been initialized.")
                 return env
             dummy_vec_env = DummyVecEnv([make_dummy_env])
             
-            # Load normalization stats
+            # Load normalization stats.
             vec_normalize = VecNormalize.load(stats_path, dummy_vec_env)
             vec_normalize.training = False
             vec_normalize.norm_reward = False
             
-            # Load PPO Model
-            ppo_model = PPO.load(ppo_path, env=vec_normalize)
-            print("🤖 Loaded PPO RL Agent and Normalization stats.")
+            # Load the selected SB3 model.
+            model_cls = DQN if MODEL_ALGO == "dqn" else PPO
+            rl_model = model_cls.load(policy_path, env=vec_normalize, device=POLICY_DEVICE)
+            print(f"🤖 Loaded {MODEL_ALGO.upper()} RL Agent and Normalization stats.")
         except Exception as e:
-            print(f"❌ Error loading PPO model: {e}")
-            ppo_model = None
+            print(f"❌ Error loading {MODEL_ALGO.upper()} model: {e}")
+            rl_model = None
             vec_normalize = None
     else:
-        print("⚠️ Warning: PPO model or stats not found. Falling back to heuristic policy.")
+        print(f"⚠️ Warning: {MODEL_ALGO.upper()} model or stats not found. Falling back to heuristic policy.")
 
     update_current_state(obs, info, 0.0, 0, "INIT")
 
@@ -169,6 +191,8 @@ def update_current_state(obs, info, reward, step, action_str):
         "next_hazard_speed_multiplier": float(obs[18]) if len(obs) > 18 else 1.0,
         "weather": str(info.get("weather", "clear")),
         "weather_zones": env.weather_map.to_dicts(),
+        "algorithm": MODEL_ALGO.upper(),
+        "run_name": ACTIVE_RUN_NAME,
         "policy_mode": POLICY_MODE,
         "maintenance_pressure": float(info.get("maintenance_pressure", 0.0)),
         "landing_feasible_now": bool(info.get("landing_feasible_now", False)),
@@ -196,12 +220,12 @@ async def simulation_loop():
             active_env = env
             obs = active_env._get_obs() # Get raw observation
             
-            if ppo_model and vec_normalize:
+            if rl_model and vec_normalize:
                 # 1. Normalize observation
                 norm_obs = vec_normalize.normalize_obs(obs)
                 deterministic = POLICY_MODE != "stochastic"
-                action, _ = ppo_model.predict(norm_obs, deterministic=deterministic)
-                action = int(action)
+                action, _ = rl_model.predict(norm_obs, deterministic=deterministic)
+                action = int(np.asarray(action).reshape(-1)[0])
             else:
                 # Simple heuristic policy fallback
                 dist_closest = active_env._dist_to_nearest_airport()

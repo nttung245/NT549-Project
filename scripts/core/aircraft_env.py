@@ -47,7 +47,7 @@ class AircraftEnv(gym.Env):
 
     # ── Physical Constants ──────────────────────────────────────
     V_CRUISE = 25.0           # Tốc độ ngang khi bay bằng (m/s ~ đơn vị/cycle)
-    V_DESCEND = 15.0          # Tốc độ ngang khi rà xuống (m/cycle)
+    V_DESCEND = 30.0          # Tốc độ ngang khi rà xuống (m/cycle), tăng để descent bớt thẳng đứng
     V_CLIMB = 20.0            # Tốc độ ngang khi leo cao (m/cycle)
     
     DESCEND_RATE = 500.0      # Tốc độ giảm độ cao (m/cycle)
@@ -345,7 +345,15 @@ class AircraftEnv(gym.Env):
         # Base step reward khuyến khích tiến lên (Reward Shaping).
         # Không còn thưởng cruise theo altitude: reward này từng khuyến khích agent
         # leo cao quá mức, làm timing DESCEND khó học dù threshold sân bay khá rộng.
-        progress_reward = distance_covered / 1500.0
+        # DESCEND có thể bay ngang nhanh hơn sau khi tăng V_DESCEND để visual mượt hơn,
+        # nhưng reward tiến độ của DESCEND được cap theo tốc độ CRUISE cùng độ cao
+        # để agent không chọn DESCEND chỉ vì dense progress reward lớn hơn CRUISE.
+        progress_distance_for_reward = float(distance_covered)
+        if action_int == 1 and was_in_air:
+            cruise_distance_same_step = current_v_cruise * weather.speed_multiplier
+            progress_distance_for_reward = min(progress_distance_for_reward, cruise_distance_same_step)
+
+        progress_reward = progress_distance_for_reward / 1500.0
         altitude_efficiency_reward = 0.0
         time_penalty = -0.01
         reward += progress_reward + altitude_efficiency_reward + time_penalty
@@ -401,41 +409,15 @@ class AircraftEnv(gym.Env):
         descent_steps_remaining = int(np.ceil(altitude_after_action / self.DESCEND_RATE)) if altitude_after_action > 0 else 0
         descent_distance_needed = descent_steps_remaining * self.V_DESCEND
         landing_feasible_now = dist_to_next_target <= (descent_distance_needed + self.LANDING_THRESHOLD)
+        destination_miss_distance = abs(float(self.distance_to_destination))
         nearest_landing_distance = min(
             dist_nearest_abs,
-            max(0.0, self.distance_to_destination),
+            destination_miss_distance,
         )
 
-        # Dense landing-profile shaping: only active when a landing/maintenance
-        # target is actually relevant. This gives PPO a smooth signal before the
-        # hard touchdown check instead of relying only on sparse ARRIVED/CRASHED.
-        target_need = max(
-            maintenance_pressure,
-            1.0 if self.distance_to_destination <= self.APPROACH_PROFILE_DISTANCE else 0.0,
-        )
-        ideal_landing_altitude = altitude_after_action
-        landing_profile_error = 0.0
-        if was_in_air and target_need > 0.05 and dist_to_next_target <= self.APPROACH_PROFILE_DISTANCE:
-            profile_span = max(1.0, self.APPROACH_PROFILE_DISTANCE - self.LANDING_THRESHOLD)
-            ideal_landing_altitude = float(np.clip(
-                max(0.0, dist_to_next_target - self.LANDING_THRESHOLD) / profile_span * self.MAX_ALTITUDE,
-                0.0,
-                self.MAX_ALTITUDE,
-            ))
-            landing_profile_error = abs(altitude_after_action - ideal_landing_altitude) / self.MAX_ALTITUDE
-            profile_reward = 0.05 * target_need * max(0.0, 1.0 - landing_profile_error)
-            reward += profile_reward
-            reward_components["landing_profile"] = profile_reward
-
-            if action_int == 1 and altitude_after_action > ideal_landing_altitude + self.DESCEND_RATE:
-                descent_profile_reward = 0.04 * target_need
-                reward += descent_profile_reward
-                reward_components["descent_profile"] = descent_profile_reward
-            elif action_int == 2 and altitude_after_action > ideal_landing_altitude + self.DESCEND_RATE:
-                climb_against_profile_penalty = -0.04 * target_need
-                reward += climb_against_profile_penalty
-                reward_components["climb_against_profile"] = climb_against_profile_penalty
-
+        # Glide-profile shaping intentionally removed for ablation.
+        # Keep feasibility/timing/terminal landing signals without rewarding a
+        # hand-coded ideal altitude curve or action-specific profile following.
         if (
             was_in_air
             and altitude_after_action <= self.LOW_ALTITUDE_THRESHOLD
@@ -475,15 +457,21 @@ class AircraftEnv(gym.Env):
             # Chỉ cho phép đáp nếu đã bay đủ xa (tránh farm điểm tại chỗ)
             valid_flight = self.dist_since_last_maintenance >= 1000.0
             at_airport = (dist_nearest_abs <= self.LANDING_THRESHOLD) and valid_flight
-            at_destination = self.distance_to_destination <= self.LANDING_THRESHOLD
+            at_destination = destination_miss_distance <= self.LANDING_THRESHOLD
 
             if at_airport or at_destination:
                 if at_destination:
-                    # Đến đích thành công!
-                    reward += 150.0
-                    reward_components["arrived"] = 150.0
+                    # Đến đích thành công, với reward scale theo độ chính xác.
+                    # Perfect touchdown nhận tối đa +150; càng xa đích trong
+                    # LANDING_THRESHOLD thì reward terminal càng giảm.
+                    arrival_accuracy = max(0.0, 1.0 - destination_miss_distance / self.LANDING_THRESHOLD)
+                    arrival_reward = 150.0 * arrival_accuracy
+                    reward += arrival_reward
+                    reward_components["arrived"] = arrival_reward
                     done = True
                     info['event'] = "ARRIVED"
+                    info['arrival_accuracy'] = float(arrival_accuracy)
+                    info['arrival_miss_distance'] = float(destination_miss_distance)
                 else:
                     # Hạ cánh bảo trì tại sân bay phụ
                     # Thưởng tỷ lệ với quãng đường đã bay từ lần bảo trì trước
@@ -538,15 +526,16 @@ class AircraftEnv(gym.Env):
                     # Reset maintenance distance counter
                     self.dist_since_last_maintenance = 0.0
             else:
-                # Soft auto-flare: if the agent touched down slightly outside the
-                # hard runway threshold, keep it alive near ground with a small
-                # distance-scaled penalty. This preserves the 3-action interface
-                # while making landing learnable from near misses.
-                can_auto_flare = (
-                    action_int == 1
-                    and valid_flight
-                    and nearest_landing_distance <= self.SOFT_LANDING_THRESHOLD
-                )
+                # Auto-flare temporarily disabled for ablation. Near-miss
+                # touchdowns outside the hard landing threshold now fall through
+                # to FIELD_CRASH instead of entering a FLARING recovery state.
+                # Original soft-recovery gate:
+                # can_auto_flare = (
+                #     action_int == 1
+                #     and valid_flight
+                #     and nearest_landing_distance <= self.SOFT_LANDING_THRESHOLD
+                # )
+                can_auto_flare = False
                 if can_auto_flare:
                     flare_penalty = -0.40 * (nearest_landing_distance / self.SOFT_LANDING_THRESHOLD)
                     reward += flare_penalty
@@ -610,14 +599,13 @@ class AircraftEnv(gym.Env):
             "weather_rul_damage": float(self.weather_rul_damage),
             "current_pos": float(current_pos),
             "distance_to_destination": float(self.distance_to_destination),
+            "destination_miss_distance": float(destination_miss_distance),
             "dist_to_next_target": float(dist_to_next_target),
             "dist_nearest_airport": float(dist_nearest_abs),
             "maintenance_pressure": float(maintenance_pressure),
             "in_approach_zone": bool(in_approach_zone),
             "landing_feasible_now": bool(landing_feasible_now),
             "nearest_landing_distance": float(nearest_landing_distance),
-            "ideal_landing_altitude": float(ideal_landing_altitude),
-            "landing_profile_error": float(landing_profile_error),
             "airport_noise": float(self.airport_noise),
             "weather_enabled": bool(self.enable_weather),
             "descent_steps_remaining": int(descent_steps_remaining),
