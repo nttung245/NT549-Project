@@ -29,6 +29,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 import mlflow
 
 # Ensure project root is importable when the script is executed directly.

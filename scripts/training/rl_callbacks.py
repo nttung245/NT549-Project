@@ -171,7 +171,6 @@ class EvalDiagnosticsCallback(BaseCallback):
         final_altitudes: list[float] = []
         first_descend_distances: list[float] = []
         nearest_landing_distances: list[float] = []
-        landing_profile_errors: list[float] = []
         soft_field_crash_distances: list[float] = []
         soft_landing_distances: list[float] = []
         airport_noises: list[float] = []
@@ -212,8 +211,6 @@ class EvalDiagnosticsCallback(BaseCallback):
 
                 if "nearest_landing_distance" in last_info:
                     nearest_landing_distances.append(float(last_info.get("nearest_landing_distance", np.nan)))
-                if "landing_profile_error" in last_info:
-                    landing_profile_errors.append(float(last_info.get("landing_profile_error", np.nan)))
                 if "soft_field_crash_distance" in last_info:
                     soft_field_crash_distances.append(float(last_info.get("soft_field_crash_distance", np.nan)))
                 if "soft_landing_distance" in last_info:
@@ -246,9 +243,6 @@ class EvalDiagnosticsCallback(BaseCallback):
         mean_nearest_landing_distance = (
             float(np.nanmean(nearest_landing_distances)) if nearest_landing_distances else -1.0
         )
-        mean_landing_profile_error = (
-            float(np.nanmean(landing_profile_errors)) if landing_profile_errors else -1.0
-        )
         mean_soft_field_crash_distance = (
             float(np.nanmean(soft_field_crash_distances)) if soft_field_crash_distances else -1.0
         )
@@ -266,7 +260,6 @@ class EvalDiagnosticsCallback(BaseCallback):
             f"{self.log_prefix}/mean_first_descend_distance": mean_first_descend_distance,
             f"{self.log_prefix}/landing_feasible_ratio": feasible_ratio,
             f"{self.log_prefix}/mean_nearest_landing_distance": mean_nearest_landing_distance,
-            f"{self.log_prefix}/mean_landing_profile_error": mean_landing_profile_error,
             f"{self.log_prefix}/mean_soft_field_crash_distance": mean_soft_field_crash_distance,
             f"{self.log_prefix}/mean_soft_landing_distance": mean_soft_landing_distance,
             f"{self.log_prefix}/mean_airport_noise": mean_airport_noise,

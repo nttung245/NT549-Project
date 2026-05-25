@@ -1,14 +1,81 @@
 # Project History
 
+## 2026-05-25 — Auto-Flare Ablation Toggle
+
+### Problem
+
+- Auto-flare acted as a soft near-miss recovery when the aircraft touched down outside the hard landing threshold but within the soft threshold.
+- For ablation, landing behavior should be evaluated without this recovery path to see whether the policy depends on flare rescue.
+
+### Changes
+
+- `scripts/core/aircraft_env.py`:
+  - Temporarily disabled the auto-flare gate by forcing `can_auto_flare = False`.
+  - Kept the original auto-flare condition as comments so it can be restored easily.
+  - Near-miss touchdowns outside the hard landing threshold now fall through to `FIELD_CRASH` instead of entering `FLARING`.
+
+### Validation
+
+- `python -m py_compile scripts/core/aircraft_env.py` passed.
+
+---
+
+## 2026-05-25 — Arrival Accuracy + Descend Dynamics Guard
+
+### Problem
+
+- PPO already learns stable landings with the current `LANDING_THRESHOLD=400` and `SOFT_LANDING_THRESHOLD=850`, so widening the thresholds as curriculum would make the task unnecessarily easier.
+- Increasing horizontal descent speed is useful for smoother-looking descent, but it can accidentally make `DESCEND` collect more dense progress reward than `CRUISE`.
+- Destination arrival previously gave the same `+150` reward anywhere inside the landing threshold, so more precise final touchdown was not distinguished.
+
+### Changes
+
+- `scripts/core/aircraft_env.py`:
+  - Increased `V_DESCEND` from `15.0` to `30.0` so descent covers more horizontal distance and looks less vertical.
+  - Added a progress-reward guard for `DESCEND`: descent can move farther physically, but its dense progress reward is capped by same-step cruise distance so the policy is not incentivized to descend only for progress farming.
+  - Replaced flat destination arrival reward with accuracy-scaled reward: perfect touchdown receives up to `+150`, while misses near the edge of `LANDING_THRESHOLD` receive a smaller arrival reward.
+  - Added `destination_miss_distance`, `arrival_accuracy`, and `arrival_miss_distance` diagnostics.
+  - Kept auto-flare unchanged for now; it remains a soft near-miss recovery mechanism rather than a success reward.
+
+### Validation
+
+- `python -m py_compile scripts/core/aircraft_env.py` passed.
+
+---
+
+## 2026-05-25 — Glide-Profile Reward Ablation
+
+### Problem
+
+- The landing reward contained a hand-coded glide-profile teacher signal through ideal altitude tracking and action-specific profile rewards.
+- This made PPO easier to train, but could bias the learned policy toward following a predefined descent curve instead of learning landing timing from feasibility, maintenance pressure, and terminal outcomes.
+
+### Changes
+
+- `scripts/core/aircraft_env.py`:
+  - Removed glide-profile shaping from `step()`: `target_need`, `ideal_landing_altitude`, `landing_profile_error`, `landing_profile`, `descent_profile`, and `climb_against_profile` reward components.
+  - Kept approach-zone feasibility/timing rewards, low-altitude safety penalty, maintenance event reward, auto-flare, and terminal outcome rewards unchanged.
+  - Removed glide-profile diagnostics from the `info` payload.
+- `scripts/training/rl_callbacks.py`:
+  - Removed `mean_landing_profile_error` diagnostic logging because `landing_profile_error` is no longer emitted by the environment.
+
+### Validation
+
+- `python -m py_compile scripts/core/aircraft_env.py scripts/training/rl_callbacks.py` passed.
+
+---
+
 ## 2026-05-10 — PPO Curriculum + Maintenance Checkpoint Training
 
 ### Problem
+
 - PPO training on many engines was slow and mixed easy/impossible starts.
 - Very high-RUL engines let the policy fly directly to destination without learning maintenance.
 - High altitude incentives made the agent climb too much and miss landing timing.
 - Notebook training behavior needed a reproducible script with MLflow, VecNormalize, and deterministic best-model eval.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py`:
   - Added `eligible_units`, `min_initial_rul`, and `maintenance_resets_health` controls.
   - Maintenance is now an intermediate checkpoint: successful subairport landing refuels and resets/swaps engine health/RUL, then route continues.
@@ -24,6 +91,7 @@
   - Keeps normalization sync, VecNormalize best-stat saving, MLflow logging, and deterministic/stochastic diagnostics.
 
 ### Validation
+
 - `.venv/bin/python -m py_compile scripts/training/train_ppo.py scripts/core/aircraft_env.py scripts/evaluation/rl_eval.py scripts/training/rl_callbacks.py` passed.
 - Confirmed default training engine subset: `[14, 62, 3]`.
 
@@ -32,11 +100,13 @@
 ## 2026-05-09 — Stochastic Eval Alignment + Grounded Landing Fix
 
 ### Problem
+
 - PPO demo/eval often collapsed into repeated `CRUISE` or repeated `DESCEND` because evaluation used deterministic argmax while PPO training uses a stochastic policy distribution.
 - After `MAINTAINED`, aircraft was grounded at altitude `0`, but `DESCEND` still moved it horizontally and consumed fuel, creating an infinite ground-slide pattern.
 - `RUL <= 0` could still terminate the episode while aircraft was already grounded at an airport after maintenance.
 
 ### Changes
+
 - Switched PPO inference/eval paths to stochastic sampling (`deterministic=False`) so evaluation/demo/server behavior matches PPO rollout training policy:
   - `scripts/evaluation/rl_eval.py`
   - `scripts/demos/demo_ppo_stable.py`
@@ -50,6 +120,7 @@
 - Fixed safe-landing histogram in `scripts/evaluation/rl_eval.py` to count `ARRIVED` and `MAINTAINED` instead of stale `LANDED`.
 
 ### Validation
+
 - `python3 -m py_compile scripts/core/aircraft_env.py scripts/evaluation/rl_eval.py scripts/training/rl_callbacks.py scripts/demos/demo_ppo_stable.py scripts/training/train_ppo.py server.py` passed.
 
 ---
@@ -57,12 +128,14 @@
 ## 2026-05-09 — Landing Continuity + MLflow + SubprocVecEnv 4 Workers
 
 ### Problem
+
 - Intermediate maintenance landing was treated as terminal (`done=True`), so SB3 VecEnv auto-reset the route and invalidated multi-leg journey learning.
 - Deferred refuel logic conflicted with VecEnv auto-reset.
 - `mlflow` dependency was missing from the project environment.
 - Notebook `SubprocVecEnv` factory captured pandas/scaler objects, causing pickle errors with multiprocessing.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py`:
   - `MAINTAINED` is now non-terminal (`done=False`).
   - Maintenance landing sets `altitude=0`, `velocity=0`, `fuel=FUEL_CAPACITY`, `flight_phase="GROUNDED"`.
@@ -76,6 +149,7 @@
   - Made `make_env()` pickle-safe by loading data/scaler inside each worker instead of capturing notebook objects.
 
 ### Validation
+
 - Forced maintenance landing verified: `event=MAINTAINED`, `done=False`, `GROUNDED`, fuel refilled, next `CLIMB` continues same route.
 - Dependency imports verified in `.venv`.
 - 4-worker smoke test passed with `SUBPROC_4ENV_SMOKE_OK`.
@@ -85,12 +159,14 @@
 ## 2026-05-08 — PPO Reward Stabilization + Eval Diagnostics
 
 ### Problem
+
 - Rollout reward looked good, but eval reward collapsed: stochastic rollout sometimes found good behavior, deterministic eval often failed quickly.
 - Dense progress reward dominated terminal success objectives.
 - Approach reward encouraged generic `DESCEND` near airports, even when landing was physically infeasible.
 - Hyperparameters in notebook drifted from earlier recommendations.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py` reward/physics tuning:
   - Reduced progress reward from `distance_covered / 1000` to `/ 1500`.
   - Added small altitude-efficiency reward only for `CRUISE` at higher altitude.
@@ -111,6 +187,7 @@
   - Added deterministic and stochastic diagnostic probes.
 
 ### Validation
+
 - `python3 -m compileall -q scripts server.py main.py` passed.
 - Notebook JSON validated.
 
@@ -119,10 +196,12 @@
 ## 2026-05-02 — Altitude-Dependent Physics + Landing Window Tuning
 
 ### Problem
+
 - Agent had little incentive to climb to high altitude.
 - Deterministic eval often crashed because the approach window and landing threshold were inconsistent with descent distance from high altitude.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py`:
   - `CRUISE` speed now scales with altitude: about `25` at ground to `40` at `12000m`.
   - Fuel rate decreases with altitude: about `0.5` at ground to `0.3` at `12000m`.
@@ -131,6 +210,7 @@
   - Removed penalty for skipping airports inside approach zone.
 
 ### Impact
+
 - High-altitude cruising became beneficial but not a guaranteed objective by itself.
 - Landing timing became more physically consistent with descent profile.
 
@@ -139,10 +219,12 @@
 ## 2026-05-02 — Dense Approach Reward + Simplified Startup
 
 ### Problem
+
 - After long training, PPO still rarely landed successfully in deterministic eval.
 - Landing reward was too sparse, startup from ground made the task harder, and entropy was too low.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py`:
   - Added dense approach reward to guide descent near airports.
   - Reduced `DESCEND_RATE` from `1000` to `500` for smoother descent.
@@ -157,6 +239,7 @@
   - Increased total training timesteps to `1,000,000`.
 
 ### Note
+
 - Observation space changed, so older PPO models became incompatible and required retraining.
 
 ---
@@ -164,11 +247,13 @@
 ## 2026-05-01 — Anti-Farm Reward + Exploration Fixes
 
 ### Problem
+
 - PPO plateaued around the fuel limit.
 - Maintenance reward could be negative for healthy landings, discouraging refuel/maintenance.
 - Naively making maintenance reward positive introduced a CLIMB/DESCEND farming exploit near the same airport.
 
 ### Changes
+
 - `scripts/core/aircraft_env.py`:
   - Set `FUEL_CAPACITY=250` so at least one maintenance/refuel is needed for the full route.
   - Reduced airport noise to `±200` for lower variance.
@@ -181,6 +266,7 @@
   - Added training output folders such as `logs/` and `mlruns/` to `.gitignore`.
 
 ### Hyperparameter Guidance
+
 - Prefer fixed learning rate `3e-4`.
 - Keep entropy high enough (`ent_coef` around `0.05`) during landing-behavior discovery.
 
@@ -189,6 +275,7 @@
 ## Earlier Baseline — Single-Agent AircraftEnv Setup
 
 ### Key State
+
 - Single-agent PPO environment for aircraft predictive maintenance.
 - Route length increased to `20000`.
 - Six sub-airports distributed along the route with controlled random noise.

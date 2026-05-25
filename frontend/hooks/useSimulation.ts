@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from "react";
 
 export type WeatherZone = {
-  type: 'headwind' | 'tailwind' | 'storm' | 'turbulence' | string;
+  type: "headwind" | "tailwind" | "storm" | "turbulence" | string;
   type_id: number;
   start: number;
   end: number;
@@ -33,6 +33,8 @@ export type SimState = {
   next_hazard_speed_multiplier: number;
   weather: string;
   weather_zones: WeatherZone[];
+  algorithm: string;
+  run_name: string;
   policy_mode: string;
   maintenance_pressure: number;
   landing_feasible_now: boolean;
@@ -45,7 +47,10 @@ export type SimState = {
   info: Record<string, unknown>;
 };
 
-const DEFAULT_WS_URLS = ['ws://localhost:8001/ws/simulation', 'ws://localhost:8000/ws/simulation'];
+const DEFAULT_WS_URLS = [
+  "ws://localhost:8001/ws/simulation",
+  "ws://localhost:8000/ws/simulation",
+];
 
 export function useSimulation() {
   const [state, setState] = useState<SimState | null>(null);
@@ -68,7 +73,7 @@ export function useSimulation() {
 
       socket.onmessage = (event) => {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'state') {
+        if (msg.type === "state") {
           setState(msg.data);
         }
       };
@@ -79,7 +84,7 @@ export function useSimulation() {
           urlIndex += 1;
           window.setTimeout(connect, 250);
         } else {
-          console.log('Disconnected from simulation server');
+          console.log("Disconnected from simulation server");
         }
       };
 
