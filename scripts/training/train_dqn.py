@@ -318,7 +318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-train", action="store_true", help="Train even if a model with the same run name already exists.")
     parser.add_argument("--check-env", action="store_true", help="Run stable-baselines3 check_env before training.")
 
-    parser.add_argument("--total-timesteps", type=int, default=1_000_000)
+    parser.add_argument("--total-timesteps", type=int, default=1_500_000)
     parser.add_argument("--n-envs", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument(
@@ -407,7 +407,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--mlflow-tracking-uri", type=str, default="http://localhost:5000")
-    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v4")
+    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v5")
 
     args = parser.parse_args()
     apply_ablation_preset(args, collect_explicit_cli_options(sys.argv[1:]))

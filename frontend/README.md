@@ -1,30 +1,79 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Aircraft Digital Twin Frontend
 
-## Getting Started
+This is a Next.js application for the aircraft digital twin dashboard and the static DQN/PPO MLflow training comparison page.
 
-First, run the development server:
+## Development
+
+Run the development server from this directory:
 
 ```bash
 bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000` for the live digital-twin dashboard, or `http://localhost:3000/training-comparison` for the DQN/PPO training comparison page.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Static DQN vs PPO MLflow comparison
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+The comparison page at `/training-comparison` is a fully static Next.js route. It does not call MLflow from the browser and does not require a Next.js API route. Instead, a Python exporter reads MLflow once and saves reusable offline files under `frontend/public/training-metrics/`. After those files are exported, you can stop MLflow and keep using or building the web page from the saved DQN/PPO metrics.
 
-## Learn More
+### Refresh MLflow data
 
-To learn more about Next.js, take a look at the following resources:
+From the repository root:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+source .venv/bin/activate
+python scripts/export_mlflow_training_history.py \
+  --mlflow-tracking-uri http://localhost:5000 \
+  --experiment-name Aircraft_Predictive_Maintenance_v5 \
+  --target-date 2026-05-26 \
+  --algorithms DQN,PPO
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The exporter writes both a backwards-compatible single JSON file and the offline snapshot folder used by the page:
 
-## Deploy on Vercel
+```text
+frontend/public/mlflow/dqn_ppo_training_history_20260526.json
+frontend/public/training-metrics/dqn-ppo-20260526/comparison.json
+frontend/public/training-metrics/dqn-ppo-20260526/manifest.json
+frontend/public/training-metrics/dqn-ppo-20260526/dqn.json
+frontend/public/training-metrics/dqn-ppo-20260526/ppo.json
+frontend/public/training-metrics/dqn-ppo-20260526/metrics.csv
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The frontend loads `frontend/public/training-metrics/dqn-ppo-20260526/comparison.json`, so MLflow is not required at runtime.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Useful exporter options:
+
+```bash
+# Export only the latest DQN and latest PPO run for the date.
+python scripts/export_mlflow_training_history.py --run-selection latest-per-algorithm
+
+# Include all run statuses instead of only FINISHED/RUNNING.
+python scripts/export_mlflow_training_history.py --statuses ALL
+
+# Also export a flat CSV with one row per metric-history point outside the snapshot folder.
+python scripts/export_mlflow_training_history.py --csv-output mlflow_training_history_20260526.csv
+
+# Write the reusable offline folder somewhere else.
+python scripts/export_mlflow_training_history.py --snapshot-dir frontend/public/training-metrics/my-snapshot
+
+# Skip writing the offline folder if you only need the legacy single JSON output.
+python scripts/export_mlflow_training_history.py --skip-snapshot
+```
+
+The exporter discovers every saved metric key dynamically from the selected MLflow runs, then preserves every history point. It does not trim unequal training lengths, so a PPO run trained for 500k timesteps and a DQN run trained for 1.5M timesteps can still be compared on absolute-step charts and normalized-progress charts.
+
+### Build the static site
+
+From `frontend/`:
+
+```bash
+bun run build
+```
+
+The project uses `output: "export"`, so the production static files are generated in `frontend/out/`. Host that directory with any static file server.
+
+## Routes
+
+- `/` — live aircraft digital twin dashboard.
+- `/training-comparison` — static DQN vs PPO MLflow metric-history comparison.
