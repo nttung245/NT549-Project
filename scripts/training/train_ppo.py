@@ -594,7 +594,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--mlflow-tracking-uri", type=str, default="http://localhost:5000")
-    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v4")
+    parser.add_argument("--mlflow-experiment", type=str, default="Aircraft_Predictive_Maintenance_v5")
 
     args = parser.parse_args()
     apply_ablation_preset(args, collect_explicit_cli_options(sys.argv[1:]))
