@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const DATA_URL = "/training-metrics/dqn-ppo-20260526/comparison.json";
+const DATA_URL = "/training-metrics/dqn-ppo-20260527/comparison.json";
 const ALGORITHM_COLORS: Record<string, string> = {
     DQN: "#38bdf8",
     PPO: "#c084fc",

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-27T13:50:18.018945+00:00",
+  "description": "Offline DQN/PPO MLflow metrics snapshot. These files can be served statically without starting MLflow.",
+  "comparison": "comparison.json",
+  "csv": "metrics.csv",
+  "algorithms": [
+    "DQN",
+    "PPO"
+  ],
+  "algorithm_files": {
+    "DQN": "dqn.json",
+    "PPO": "ppo.json"
+  },
+  "experiment": {
+    "name": "Aircraft_Predictive_Maintenance_v6",
+    "experiment_id": "5",
+    "artifact_location": "mlflow-artifacts:/5",
+    "lifecycle_stage": "active"
+  },
+  "target_date": "2026-05-27",
+  "timezone": "UTC",
+  "summary": {
+    "run_count": 2,
+    "metric_count": 71,
+    "total_metric_points": 48797,
+    "runs_by_algorithm": {
+      "DQN": 1,
+      "PPO": 1
+    },
+    "max_step_by_algorithm": {
+      "DQN": 2999020,
+      "PPO": 3006464
+    }
+  },
+  "metric_groups": [
+    {
+      "key": "rollout",
+      "label": "Rollout training signals",
+      "order": 0
+    },
+    {
+      "key": "train",
+      "label": "Optimizer and policy training",
+      "order": 1
+    },
+    {
+      "key": "eval",
+      "label": "Evaluation checkpoint metrics",
+      "order": 2
+    },
+    {
+      "key": "eval_diag_det",
+      "label": "Deterministic evaluation diagnostics",
+      "order": 3
+    },
+    {
+      "key": "eval_diag_stoch",
+      "label": "Stochastic evaluation diagnostics",
+      "order": 4
+    },
+    {
+      "key": "time",
+      "label": "Runtime and throughput",
+      "order": 5
+    },
+    {
+      "key": "diagnostics",
+      "label": "Environment diagnostics",
+      "order": 6
+    },
+    {
+      "key": "other",
+      "label": "Other MLflow metrics",
+      "order": 7
+    }
+  ]
+}
